@@ -13,6 +13,10 @@ def get_admin_main_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📅 На завтра", callback_data="admin_tomorrow")
         ],
         [
+            InlineKeyboardButton(text="🔍 Пошук", callback_data="admin_search"),
+            InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")
+        ],
+        [
             InlineKeyboardButton(text="📝 Журнал подій", callback_data="admin_activity_log")
         ]
     ])
@@ -25,6 +29,9 @@ def get_booking_details_kb(booking_id: int, status: str, back_callback: str, has
     if status == "payment_pending_review":
         action_row.append(InlineKeyboardButton(text="✅ Схвалити оплату", callback_data=f"adm_pay_confirm_{booking_id}_{back_callback}"))
         action_row.append(InlineKeyboardButton(text="❌ Відхилити оплату", callback_data=f"adm_pay_reject_{booking_id}_{back_callback}"))
+    elif status == "awaiting_payment":
+        action_row.append(InlineKeyboardButton(text="✅ Підтвердити", callback_data=f"adm_confirm_{booking_id}_{back_callback}"))
+        action_row.append(InlineKeyboardButton(text="❌ Скасувати", callback_data=f"adm_cancel_{booking_id}_{back_callback}"))
     else:
         # If the booking is not cancelled, allow cancelling it
         if status != "cancelled":

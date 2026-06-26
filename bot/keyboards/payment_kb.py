@@ -26,13 +26,14 @@ def admin_payment_review_kb(booking_id: int) -> InlineKeyboardMarkup:
         )]
     ])
 
-def reject_reason_kb() -> InlineKeyboardMarkup:
+def reject_reason_kb(booking_id: int, back_callback: str) -> InlineKeyboardMarkup:
     """Predefined rejection reasons for admin."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💰 Сума не співпадає", callback_data="reject_reason:amount")],
         [InlineKeyboardButton(text="📝 Коментар не вірний", callback_data="reject_reason:comment")],
         [InlineKeyboardButton(text="📸 Скріншот нечіткий", callback_data="reject_reason:screenshot")],
         [InlineKeyboardButton(text="✏️ Інша причина", callback_data="reject_reason:other")],
+        [InlineKeyboardButton(text="⬅️ Назад (Не відхиляти)", callback_data=f"adm_view_{booking_id}_{back_callback}")]
     ])
 
 def retry_payment_kb(booking_id: int) -> InlineKeyboardMarkup:

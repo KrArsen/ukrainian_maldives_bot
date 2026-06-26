@@ -180,3 +180,88 @@ async def get_expired_payment_bookings(session: AsyncSession) -> list[Booking]:
         )
     )
     return list(result.scalars().all())
+
+async def get_admin_stats(session: AsyncSession) -> dict:
+    from bot.database.models import Payment
+    
+    # 1. Total users
+    total_users_res = await session.execute(select(func.count(User.telegram_id)))
+    total_users = total_users_res.scalar() or 0
+    
+    # 2. Total bookings count
+    total_bookings_res = await session.execute(select(func.count(Booking.id)))
+    total_bookings = total_bookings_res.scalar() or 0
+    
+    # 3. Bookings by status
+    status_counts = {
+        BookingStatus.awaiting_payment: 0,
+        BookingStatus.payment_pending_review: 0,
+        BookingStatus.confirmed: 0,
+        BookingStatus.cancelled: 0,
+    }
+    
+    status_res = await session.execute(
+        select(Booking.status, func.count(Booking.id)).group_by(Booking.status)
+    )
+    for status, count in status_res.all():
+        if status in status_counts:
+            status_counts[status] = count
+            
+    # 4. Total revenue (sum of confirmed payments)
+    revenue_res = await session.execute(
+        select(func.sum(Payment.amount)).where(Payment.status == "confirmed")
+    )
+    total_revenue = revenue_res.scalar() or 0
+    
+    return {
+        "total_users": total_users,
+        "total_bookings": total_bookings,
+        "awaiting_payment": status_counts[BookingStatus.awaiting_payment],
+        "payment_pending_review": status_counts[BookingStatus.payment_pending_review],
+        "confirmed": status_counts[BookingStatus.confirmed],
+        "cancelled": status_counts[BookingStatus.cancelled],
+        "total_revenue": float(total_revenue)
+    }
+
+async def search_bookings(session: AsyncSession, query: str) -> list[Booking]:
+    from sqlalchemy import or_
+    query_clean = query.strip()
+    if not query_clean:
+        return []
+        
+    conditions = []
+    
+    # Search by Booking ID
+    if query_clean.isdigit():
+        conditions.append(Booking.id == int(query_clean))
+    elif query_clean.startswith("#") and query_clean[1:].isdigit():
+        conditions.append(Booking.id == int(query_clean[1:]))
+        
+    # Search by shelter number (if single digit 1-10)
+    if query_clean.isdigit() and 1 <= int(query_clean) <= 10:
+        conditions.append(Booking.shelter_num == int(query_clean))
+        
+    # Search by client name (case-insensitive)
+    conditions.append(Booking.client_name.ilike(f"%{query_clean}%"))
+    
+    # Search by phone number (comparing digit substrings)
+    phone_digits = "".join(filter(str.isdigit, query_clean))
+    if phone_digits:
+        conditions.append(Booking.client_phone.like(f"%{phone_digits}%"))
+        
+    result = await session.execute(
+        select(Booking).where(or_(*conditions)).order_by(Booking.booking_date.desc()).limit(50)
+    )
+    return list(result.scalars().all())
+
+async def get_bookings_count(session: AsyncSession) -> int:
+    result = await session.execute(select(func.count(Booking.id)))
+    return result.scalar() or 0
+
+async def get_all_bookings_paginated(session: AsyncSession, offset: int, limit: int) -> list[Booking]:
+    result = await session.execute(
+        select(Booking).order_by(Booking.booking_date.desc()).offset(offset).limit(limit)
+    )
+    return list(result.scalars().all())
+
+

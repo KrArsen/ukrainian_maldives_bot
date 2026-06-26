@@ -5,20 +5,24 @@ from aiogram import Router, F, Bot
 from aiogram.filters import Command, StateFilter
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
 from aiogram.fsm.context import FSMContext
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.config import settings
 from bot.database.models import BookingStatus, Booking, User
 from bot.database.queries import (
     get_pending_bookings,
-    get_all_bookings,
+    get_bookings_count,
+    get_all_bookings_paginated,
     get_bookings_on_date,
     confirm_booking,
     cancel_booking,
     log_activity,
     get_recent_activity,
     confirm_payment,
-    reject_payment
+    reject_payment,
+    get_admin_stats,
+    search_bookings
 )
 from bot.keyboards.admin_kb import (
     get_admin_main_kb,
@@ -51,10 +55,12 @@ async def cmd_admin(message: Message, session: AsyncSession):
 
 # Callback to view main panel menu again
 @router.callback_query(F.data == "admin_menu")
-async def callback_admin_menu(callback_query: CallbackQuery, bot: Bot, session: AsyncSession):
+async def callback_admin_menu(callback_query: CallbackQuery, bot: Bot, session: AsyncSession, state: FSMContext = None):
     if not await is_admin(callback_query.from_user.id, session):
         await callback_query.answer()
         return
+    if state:
+        await state.clear()
     await callback_query.answer()
     await bot.edit_message_text(
         chat_id=callback_query.message.chat.id,
@@ -64,10 +70,12 @@ async def callback_admin_menu(callback_query: CallbackQuery, bot: Bot, session: 
     )
 
 @router.callback_query(F.data == "admin_close_panel")
-async def callback_admin_close(callback_query: CallbackQuery, bot: Bot, session: AsyncSession):
+async def callback_admin_close(callback_query: CallbackQuery, bot: Bot, session: AsyncSession, state: FSMContext = None):
     if not await is_admin(callback_query.from_user.id, session):
         await callback_query.answer()
         return
+    if state:
+        await state.clear()
     await callback_query.answer()
     try:
         await bot.delete_message(chat_id=callback_query.message.chat.id, message_id=callback_query.message.message_id)
@@ -76,10 +84,12 @@ async def callback_admin_close(callback_query: CallbackQuery, bot: Bot, session:
 
 # 🔔 Нові заявки (Pending bookings list)
 @router.callback_query(F.data == "admin_pending")
-async def callback_admin_pending(callback_query: CallbackQuery, session: AsyncSession, bot: Bot):
+async def callback_admin_pending(callback_query: CallbackQuery, session: AsyncSession, bot: Bot, state: FSMContext = None):
     if not await is_admin(callback_query.from_user.id, session):
         await callback_query.answer()
         return
+    if state:
+        await state.clear()
         
     await callback_query.answer()
     bookings = await get_pending_bookings(session)
@@ -117,12 +127,16 @@ async def callback_admin_pending(callback_query: CallbackQuery, session: AsyncSe
 
 # Today's list
 @router.callback_query(F.data == "admin_today")
-async def callback_admin_today(callback_query: CallbackQuery, session: AsyncSession, bot: Bot):
+async def callback_admin_today(callback_query: CallbackQuery, session: AsyncSession, bot: Bot, state: FSMContext = None):
+    if state:
+        await state.clear()
     await show_bookings_on_target_date(callback_query, date.today(), "today", session, bot)
 
 # Tomorrow's list
 @router.callback_query(F.data == "admin_tomorrow")
-async def callback_admin_tomorrow(callback_query: CallbackQuery, session: AsyncSession, bot: Bot):
+async def callback_admin_tomorrow(callback_query: CallbackQuery, session: AsyncSession, bot: Bot, state: FSMContext = None):
+    if state:
+        await state.clear()
     await show_bookings_on_target_date(callback_query, date.today() + timedelta(days=1), "tomorrow", session, bot)
 
 async def show_bookings_on_date_internal(chat_id: int, target_date: date, back_callback: str, session: AsyncSession, bot: Bot, edit_message_id: int | None = None):
@@ -176,11 +190,11 @@ async def show_bookings_on_target_date(callback_query: CallbackQuery, target_dat
     )
 
 # All bookings list (Paginated with interactive details)
+# All bookings list (Paginated with interactive details)
 async def show_all_bookings_internal(chat_id: int, page: int, session: AsyncSession, bot: Bot, edit_message_id: int | None = None):
-    bookings = await get_all_bookings(session) # Fetch last 50
-    total_count = len(bookings)
+    total_count = await get_bookings_count(session)
     
-    if not bookings:
+    if total_count == 0:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_menu")]
         ])
@@ -192,11 +206,16 @@ async def show_all_bookings_internal(chat_id: int, page: int, session: AsyncSess
         return
         
     total_pages = math.ceil(total_count / ITEMS_PER_PAGE)
-    start_idx = (page - 1) * ITEMS_PER_PAGE
-    end_idx = start_idx + ITEMS_PER_PAGE
-    page_bookings = bookings[start_idx:end_idx]
     
-    text = f"📋 <b>Останні {total_count} бронювань (сторінка {page}/{total_pages}):</b>\n\nОберіть бронювання для перегляду та дій:"
+    if page > total_pages:
+        page = total_pages
+    elif page < 1:
+        page = 1
+        
+    offset = (page - 1) * ITEMS_PER_PAGE
+    page_bookings = await get_all_bookings_paginated(session, offset, ITEMS_PER_PAGE)
+    
+    text = f"📋 <b>Всі бронювання (сторінка {page}/{total_pages}, всього {total_count}):</b>\n\nОберіть бронювання для перегляду та дій:"
     
     buttons = []
     for b in page_bookings:
@@ -213,9 +232,7 @@ async def show_all_bookings_internal(chat_id: int, page: int, session: AsyncSess
         buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"adm_view_{b.id}_all_{page}")])
         
     pagination_kb = get_all_bookings_pagination_kb(page, total_pages)
-    # Merge pagination buttons
     merged_buttons = buttons + pagination_kb.inline_keyboard
-    # Insert back to menu button at the top of menu navigation controls
     merged_buttons.insert(-1, [InlineKeyboardButton(text="⬅️ Назад до меню", callback_data="admin_menu")])
     
     kb = InlineKeyboardMarkup(inline_keyboard=merged_buttons)
@@ -229,10 +246,12 @@ async def show_all_bookings_internal(chat_id: int, page: int, session: AsyncSess
         await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
 
 @router.callback_query(F.data.startswith("admin_all_"))
-async def callback_admin_all(callback_query: CallbackQuery, session: AsyncSession, bot: Bot):
+async def callback_admin_all(callback_query: CallbackQuery, session: AsyncSession, bot: Bot, state: FSMContext = None):
     if not await is_admin(callback_query.from_user.id, session):
         await callback_query.answer()
         return
+    if state:
+        await state.clear()
         
     page = int(callback_query.data.split("_")[-1])
     await callback_query.answer()
@@ -246,10 +265,12 @@ async def callback_admin_all(callback_query: CallbackQuery, session: AsyncSessio
 
 # Booking Details view handler
 @router.callback_query(F.data.startswith("adm_view_"))
-async def callback_admin_view_booking(callback_query: CallbackQuery, session: AsyncSession, bot: Bot):
+async def callback_admin_view_booking(callback_query: CallbackQuery, session: AsyncSession, bot: Bot, state: FSMContext = None):
     if not await is_admin(callback_query.from_user.id, session):
         await callback_query.answer()
         return
+    if state:
+        await state.clear()
         
     await callback_query.answer()
     parts = callback_query.data.split("_")
@@ -362,11 +383,15 @@ async def callback_cancel_booking_request(callback_query: CallbackQuery, state: 
         cancel_back_callback=back_callback
     )
     
-    # Send a prompt and hide keyboard
+    # Send a prompt with a cancel button
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад (Не скасовувати)", callback_data=f"adm_view_{booking_id}_{back_callback}")]
+    ])
     await bot.send_message(
         chat_id=callback_query.message.chat.id,
         text=f"✍️ <b>Скасування заявки #{booking_id}</b>\n\nВведіть причину скасування для клієнта:",
-        reply_markup=ReplyKeyboardRemove()
+        reply_markup=kb,
+        parse_mode="HTML"
     )
 
 # Receive cancellation reason text
@@ -429,6 +454,9 @@ async def process_cancel_reason(message: Message, state: FSMContext, session: As
         elif back_callback.startswith("all_"):
             page = int(back_callback.split("_")[-1])
             await show_all_bookings_internal(message.chat.id, page, session, bot)
+        elif back_callback.startswith("search_"):
+            query = back_callback[7:]
+            await show_search_results_internal(message.chat.id, query, session, bot)
     else:
         await message.answer("❌ Сталася помилка при скасуванні.")
         await state.clear()
@@ -628,7 +656,7 @@ async def admin_reject_payment_request(callback_query: CallbackQuery, state: FSM
     from bot.keyboards.payment_kb import reject_reason_kb
     await callback_query.message.answer(
         "Оберіть причину відхилення оплати:",
-        reply_markup=reject_reason_kb()
+        reply_markup=reject_reason_kb(booking_id, back_callback or "pending")
     )
 
 # --- RECEIVE REJECT REASON CALLBACK ---
@@ -823,3 +851,172 @@ async def callback_admin_show_pay_screenshot(callback_query: CallbackQuery, sess
             )
         except Exception as e:
             await callback_query.answer(f"Помилка відправки чеку: {e}", show_alert=True)
+
+# 📊 Статистика (Statistics)
+async def show_admin_stats_internal(chat_id: int, session: AsyncSession, bot: Bot, edit_message_id: int | None = None):
+    stats = await get_admin_stats(session)
+    text = (
+        "📊 <b>Статистика бота «Українські Мальдіви»</b>\n\n"
+        f"👥 <b>Всього користувачів:</b> {stats['total_users']}\n"
+        f"📋 <b>Всього бронювань:</b> {stats['total_bookings']}\n\n"
+        f"⏳ <b>Очікують оплати:</b> {stats['awaiting_payment']}\n"
+        f"🔍 <b>На перевірці оплати:</b> {stats['payment_pending_review']}\n"
+        f"✅ <b>Підтверджено:</b> {stats['confirmed']}\n"
+        f"❌ <b>Скасовано:</b> {stats['cancelled']}\n\n"
+        f"💰 <b>Загальний дохід:</b> {stats['total_revenue']:,.2f} грн"
+    )
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🔄 Оновити", callback_data="admin_stats_refresh"),
+            InlineKeyboardButton(text="⬅️ Назад до меню", callback_data="admin_menu")
+        ]
+    ])
+    
+    if edit_message_id:
+        try:
+            await bot.edit_message_text(chat_id=chat_id, message_id=edit_message_id, text=text, reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb, parse_mode="HTML")
+
+@router.callback_query(F.data == "admin_stats")
+async def callback_admin_stats(callback_query: CallbackQuery, session: AsyncSession, bot: Bot, state: FSMContext = None):
+    if not await is_admin(callback_query.from_user.id, session):
+        await callback_query.answer()
+        return
+    if state:
+        await state.clear()
+    await callback_query.answer()
+    await show_admin_stats_internal(
+        chat_id=callback_query.message.chat.id,
+        session=session,
+        bot=bot,
+        edit_message_id=callback_query.message.message_id
+    )
+
+@router.callback_query(F.data == "admin_stats_refresh")
+async def callback_admin_stats_refresh(callback_query: CallbackQuery, session: AsyncSession, bot: Bot, state: FSMContext = None):
+    if not await is_admin(callback_query.from_user.id, session):
+        await callback_query.answer()
+        return
+    if state:
+        await state.clear()
+    await callback_query.answer("Дані оновлено!")
+    await show_admin_stats_internal(
+        chat_id=callback_query.message.chat.id,
+        session=session,
+        bot=bot,
+        edit_message_id=callback_query.message.message_id
+    )
+
+# 🔍 Пошук (Search)
+@router.callback_query(F.data == "admin_search")
+async def callback_admin_search(callback_query: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot):
+    if not await is_admin(callback_query.from_user.id, session):
+        await callback_query.answer()
+        return
+    await state.clear()
+    await callback_query.answer()
+    
+    await state.set_state(AdminFSM.waiting_search_query)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Скасувати пошук", callback_data="admin_menu")]
+    ])
+    
+    await bot.edit_message_text(
+        chat_id=callback_query.message.chat.id,
+        message_id=callback_query.message.message_id,
+        text="🔍 <b>Пошук бронювань</b>\n\nВведіть запит для пошуку (ID замовлення, ім'я клієнта, телефон або номер шатра):",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+
+@router.message(StateFilter(AdminFSM.waiting_search_query))
+async def process_search_query(message: Message, state: FSMContext, session: AsyncSession, bot: Bot):
+    if not await is_admin(message.from_user.id, session):
+        await state.clear()
+        return
+        
+    query = message.text.strip() if message.text else ""
+    if not query:
+        await message.answer("Будь ласка, введіть текстовий запит для пошуку.")
+        return
+        
+    await state.clear()
+    await show_search_results_internal(message.chat.id, query, session, bot)
+
+async def show_search_results_internal(chat_id: int, query: str, session: AsyncSession, bot: Bot, edit_message_id: int | None = None):
+    # Truncate query to prevent exceeding Telegram callback 64 bytes limit (admin_search_{query})
+    safe_query = query.strip()[:35]
+    
+    bookings = await search_bookings(session, safe_query)
+    
+    if not bookings:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🔍 Спробувати знову", callback_data="admin_search"),
+                InlineKeyboardButton(text="⬅️ До меню", callback_data="admin_menu")
+            ]
+        ])
+        text = f"❌ Бронювань за запитом «<b>{safe_query}</b>» не знайдено."
+        if edit_message_id:
+            await bot.edit_message_text(chat_id=chat_id, message_id=edit_message_id, text=text, reply_markup=kb, parse_mode="HTML")
+        else:
+            await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb, parse_mode="HTML")
+        return
+        
+    lines = [f"🔍 <b>Результати пошуку для «{safe_query}» (знайдено {len(bookings)}):</b>\n\nОберіть бронювання для керування:"]
+    buttons = []
+    
+    for b in bookings:
+        status_icon = "💳"
+        if b.status == BookingStatus.payment_pending_review:
+            status_icon = "🔍"
+        elif b.status == BookingStatus.confirmed:
+            status_icon = "✅"
+        elif b.status == BookingStatus.cancelled:
+            status_icon = "❌"
+            
+        date_str = b.booking_date.strftime("%d.%m")
+        btn_text = f"#{b.id} | 🛖 №{b.shelter_num} | 📅 {date_str} | {b.client_name} ({status_icon})"
+        
+        # Details view with search context back_callback
+        callback_data = f"adm_view_{b.id}_search_{safe_query}"
+        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=callback_data)])
+        
+    buttons.append([
+        InlineKeyboardButton(text="🔍 Новий пошук", callback_data="admin_search"),
+        InlineKeyboardButton(text="⬅️ До меню", callback_data="admin_menu")
+    ])
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    
+    text = "\n".join(lines)
+    if edit_message_id:
+        try:
+            await bot.edit_message_text(chat_id=chat_id, message_id=edit_message_id, text=text, reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb, parse_mode="HTML")
+
+@router.callback_query(F.data.startswith("admin_search_"))
+async def callback_admin_search_back(callback_query: CallbackQuery, session: AsyncSession, bot: Bot, state: FSMContext = None):
+    if not await is_admin(callback_query.from_user.id, session):
+        await callback_query.answer()
+        return
+    if state:
+        await state.clear()
+    await callback_query.answer()
+    
+    # Extract query from callback_data e.g. admin_search_{query}
+    query = callback_query.data[13:]
+    await show_search_results_internal(
+        chat_id=callback_query.message.chat.id,
+        query=query,
+        session=session,
+        bot=bot,
+        edit_message_id=callback_query.message.message_id
+    )
