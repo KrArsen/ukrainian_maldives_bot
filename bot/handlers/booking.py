@@ -12,7 +12,8 @@ from bot.database.models import BookingStatus
 from bot.database.queries import (
     create_booking,
     get_booked_shelters_on_date,
-    log_activity
+    log_activity,
+    create_payment
 )
 from bot.keyboards.booking_kb import (
     get_booking_dates_kb,
@@ -189,7 +190,7 @@ async def process_booking_confirmed(callback_query: CallbackQuery, state: FSMCon
     booking_date = date.fromisoformat(data["booking_date"])
     date_ua_format = booking_date.strftime("%d.%m.%Y")
     
-    # Save booking to database
+    # Save booking to database (defaults to awaiting_payment status)
     booking = await create_booking(
         session=session,
         user_id=callback_query.from_user.id,
@@ -198,12 +199,26 @@ async def process_booking_confirmed(callback_query: CallbackQuery, state: FSMCon
         client_name=data["client_name"],
         client_phone=data["client_phone"]
     )
-    await session.commit()
+    
+    # Calculate price based on weekday/weekend
+    # weekday() returns 0 for Monday ... 4 for Friday, 5 for Saturday, 6 for Sunday
+    is_weekend = booking_date.weekday() in (4, 5, 6) # Friday, Saturday, Sunday
+    price = settings.WEEKEND_PRICE if is_weekend else settings.WEEKDAY_PRICE
+    
+    # Create payment record
+    comment = f"{booking.client_name} {date_ua_format}"
+    await create_payment(
+        session=session,
+        booking_id=booking.id,
+        amount=float(price),
+        card=settings.MONOBANK_CARD,
+        comment=comment
+    )
     
     await log_activity(
         session=session,
         action_type="created",
-        details=f"Користувач {booking.client_name} ({booking.client_phone}) забронював Шатро №{booking.shelter_num} на {date_ua_format} (ID: {booking.id})",
+        details=f"Користувач {booking.client_name} ({booking.client_phone}) забронював Шатро №{booking.shelter_num} на {date_ua_format} (ID: {booking.id}), статус: очікує оплати",
         booking_id=booking.id,
         user_id=callback_query.from_user.id
     )
@@ -214,46 +229,30 @@ async def process_booking_confirmed(callback_query: CallbackQuery, state: FSMCon
     except Exception:
         pass
         
-    # Send success response to client
-    success_text = (
-        "✅ <b>Заявку прийнято!</b>\n\n"
-        f"🛖 Шатро №{booking.shelter_num}\n"
-        f"📅 {date_ua_format}\n"
-        f"👤 {booking.client_name}\n\n"
-        "⏳ Очікуйте підтвердження від адміністратора."
+    # Format card number for display (spaces every 4 digits)
+    cleaned_card = "".join(filter(str.isdigit, settings.MONOBANK_CARD))
+    formatted_card = " ".join(cleaned_card[i:i+4] for i in range(0, len(cleaned_card), 4))
+    
+    # Send instructions and Monobank card to user
+    payment_text = (
+        "💳 <b>Для підтвердження бронювання необхідно сплатити:</b>\n\n"
+        f"🛖 <b>Шатро №{booking.shelter_num}</b>\n"
+        f"📅 <b>Дата:</b> {date_ua_format}\n"
+        f"💰 <b>Сума до сплати:</b> {price} грн\n\n"
+        f"💳 <b>Карта Monobank:</b> <code>{formatted_card}</code>\n"
+        f"👤 <b>Отримувач:</b> {settings.MONOBANK_CARD_OWNER}\n\n"
+        "⚠️ <b>ВАЖЛИВО:</b> При переказі обов'язково вкажіть у коментарі:\n"
+        f"📝 <code>{comment}</code>\n\n"
+        "Після оплати натисніть кнопку нижче 👇"
     )
+    
+    from bot.keyboards.payment_kb import payment_instructions_kb
     await bot.send_message(
         chat_id=callback_query.message.chat.id,
-        text=success_text,
-        reply_markup=get_main_menu()
+        text=payment_text,
+        reply_markup=payment_instructions_kb(booking.id),
+        parse_mode="HTML"
     )
     
-    # Send alert to all Admin IDs
-    created_at_str = booking.created_at.strftime("%H:%M %d.%m.%Y")
-    admin_text = (
-        f"🔔 <b>Нова заявка #{booking.id}</b>\n\n"
-        f"🛖 Шатро №{booking.shelter_num}\n"
-        f"📅 {date_ua_format}\n"
-        f"👤 {booking.client_name}\n"
-        f"📞 {booking.client_phone}\n"
-        f"🕐 {created_at_str}"
-    )
-    
-    # Setup actions keyboard for admin alert
-    from bot.keyboards.admin_kb import get_pending_booking_actions_kb
-    admin_kb = get_pending_booking_actions_kb(booking.id)
-    
-    # Get all admin IDs from both config (.env) and database
-    from bot.database.models import User
-    from sqlalchemy import select
-    db_admins_res = await session.execute(select(User.telegram_id).where(User.is_admin == True))
-    all_admin_ids = set(settings.ADMIN_IDS) | {row[0] for row in db_admins_res.fetchall()}
-    
-    for admin_id in all_admin_ids:
-        try:
-            await bot.send_message(chat_id=admin_id, text=admin_text, reply_markup=admin_kb)
-        except Exception:
-            pass
-            
     await state.clear()
 

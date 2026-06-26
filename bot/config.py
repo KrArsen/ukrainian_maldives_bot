@@ -8,6 +8,11 @@ class Settings(BaseSettings):
     RESORT_PHONE: str = "+380000000000"
     RESORT_ADDRESS: str = "Чернівецька область"
     RESORT_INSTAGRAM: str = "@ukrainski_maldivi"
+    MONOBANK_CARD: str
+    MONOBANK_CARD_OWNER: str
+    WEEKDAY_PRICE: int = 1700
+    WEEKEND_PRICE: int = 2200
+    PAYMENT_TIMEOUT_HOURS: int = 24
 
     @field_validator("ADMIN_IDS", mode="before")
     @classmethod

@@ -16,7 +16,9 @@ from bot.database.queries import (
     confirm_booking,
     cancel_booking,
     log_activity,
-    get_recent_activity
+    get_recent_activity,
+    confirm_payment,
+    reject_payment
 )
 from bot.keyboards.admin_kb import (
     get_admin_main_kb,
@@ -24,6 +26,7 @@ from bot.keyboards.admin_kb import (
     get_all_bookings_pagination_kb
 )
 from bot.states.booking_states import AdminFSM
+from bot.states.payment_states import PaymentStates
 
 router = Router()
 
@@ -197,8 +200,10 @@ async def show_all_bookings_internal(chat_id: int, page: int, session: AsyncSess
     
     buttons = []
     for b in page_bookings:
-        status_icon = "⏳"
-        if b.status == BookingStatus.confirmed:
+        status_icon = "💳"
+        if b.status == BookingStatus.payment_pending_review:
+            status_icon = "🔍"
+        elif b.status == BookingStatus.confirmed:
             status_icon = "✅"
         elif b.status == BookingStatus.cancelled:
             status_icon = "❌"
@@ -256,8 +261,10 @@ async def callback_admin_view_booking(callback_query: CallbackQuery, session: As
         await callback_query.answer("Бронювання не знайдено.", show_alert=True)
         return
         
-    status_label = "⏳ Очікує підтвердження"
-    if b.status == BookingStatus.confirmed:
+    status_label = "⏳ Очікує оплати"
+    if b.status == BookingStatus.payment_pending_review:
+        status_label = "🔍 Перевірка оплати"
+    elif b.status == BookingStatus.confirmed:
         status_label = "✅ Підтверджено"
     elif b.status == BookingStatus.cancelled:
         status_label = "❌ Скасовано"
@@ -501,3 +508,256 @@ async def callback_admin_activity_refresh(callback_query: CallbackQuery, session
         bot=bot,
         edit_message_id=callback_query.message.message_id
     )
+
+# --- ADMIN CONFIRM PAYMENT (From alert or details view) ---
+@router.callback_query(F.data.startswith("admin_confirm_payment:") | F.data.startswith("adm_pay_confirm_"))
+async def admin_confirm_payment_handler(callback_query: CallbackQuery, session: AsyncSession, bot: Bot):
+    if not await is_admin(callback_query.from_user.id, session):
+        await callback_query.answer()
+        return
+
+    # Parse booking_id and back_callback target if any
+    if callback_query.data.startswith("admin_confirm_payment:"):
+        booking_id = int(callback_query.data.split(":")[1])
+        back_callback = None
+    else:
+        # e.g., adm_pay_confirm_123_pending
+        parts = callback_query.data.split("_")
+        booking_id = int(parts[3])
+        back_callback = "_".join(parts[4:])
+
+    # Set booking status to confirmed
+    b = await session.get(Booking, booking_id)
+    if b:
+        # Confirm the payment in DB
+        await confirm_payment(session, booking_id, confirmed_by=callback_query.from_user.id)
+        
+        b.status = BookingStatus.confirmed
+        await session.commit()
+        
+        # Log activity
+        await log_activity(
+            session=session,
+            action_type="confirmed",
+            details=f"Адмін підтвердив оплату для броні #{b.id} (Шатро №{b.shelter_num}, {b.booking_date.strftime('%d.%m.%Y')}, {b.client_name})",
+            booking_id=b.id,
+            user_id=callback_query.from_user.id
+        )
+
+        # Notify client
+        try:
+            user_text = (
+                "🎉 <b>Ваше бронювання підтверджено!</b>\n\n"
+                f"🛖 Шатро №{b.shelter_num}\n"
+                f"📅 Дата заїзду: {b.booking_date.strftime('%d.%m.%Y')}\n"
+                f"👤 {b.client_name}\n\n"
+                f"Чекаємо вас! З питань телефонуйте: {settings.RESORT_PHONE}"
+            )
+            await bot.send_message(chat_id=b.user_id, text=user_text, parse_mode="HTML")
+        except Exception:
+            pass
+
+        await callback_query.answer("✅ Оплату підтверджено!")
+        
+        # Update admin message
+        if back_callback:
+            # If from details view, refresh the view
+            await callback_admin_view_booking(callback_query, session, bot)
+        else:
+            # If from chat alert, update the caption and remove keyboard
+            if callback_query.message.caption:
+                new_caption = callback_query.message.caption + "\n\n✅ <b>ОПЛАТУ ПІДТВЕРДЖЕНО</b>"
+                try:
+                    await bot.edit_message_caption(
+                        chat_id=callback_query.message.chat.id,
+                        message_id=callback_query.message.message_id,
+                        caption=new_caption,
+                        parse_mode="HTML",
+                        reply_markup=None
+                    )
+                except Exception:
+                    pass
+            else:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=callback_query.message.chat.id,
+                        message_id=callback_query.message.message_id,
+                        text=callback_query.message.text + "\n\n✅ <b>ОПЛАТУ ПІДТВЕРДЖЕНО</b>",
+                        reply_markup=None
+                    )
+                except Exception:
+                    pass
+    else:
+        await callback_query.answer("Бронювання не знайдено.", show_alert=True)
+
+# --- ADMIN REJECT PAYMENT (From alert or details view) ---
+@router.callback_query(F.data.startswith("admin_reject_payment:") | F.data.startswith("adm_pay_reject_"))
+async def admin_reject_payment_request(callback_query: CallbackQuery, state: FSMContext, session: AsyncSession):
+    if not await is_admin(callback_query.from_user.id, session):
+        await callback_query.answer()
+        return
+
+    await callback_query.answer()
+    
+    # Parse booking_id and back_callback target
+    if callback_query.data.startswith("admin_reject_payment:"):
+        booking_id = int(callback_query.data.split(":")[1])
+        back_callback = None
+    else:
+        # e.g., adm_pay_reject_123_pending
+        parts = callback_query.data.split("_")
+        booking_id = int(parts[3])
+        back_callback = "_".join(parts[4:])
+
+    from bot.states.payment_states import PaymentStates
+    await state.set_state(PaymentStates.waiting_reject_reason)
+    await state.update_data(
+        reject_booking_id=booking_id,
+        reject_message_id=callback_query.message.message_id,
+        reject_back_callback=back_callback
+    )
+
+    from bot.keyboards.payment_kb import reject_reason_kb
+    await callback_query.message.answer(
+        "Оберіть причину відхилення оплати:",
+        reply_markup=reject_reason_kb()
+    )
+
+# --- RECEIVE REJECT REASON CALLBACK ---
+@router.callback_query(F.data.startswith("reject_reason:"), StateFilter(PaymentStates.waiting_reject_reason))
+async def process_reject_reason_callback(callback_query: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot):
+    if not await is_admin(callback_query.from_user.id, session):
+        await callback_query.answer()
+        return
+
+    await callback_query.answer()
+    reason_code = callback_query.data.split(":")[1]
+
+    reasons = {
+        "amount": "Сума не співпадає",
+        "comment": "Коментар не вірний (вкажіть ваше Ім'я та Прізвище)",
+        "screenshot": "Скріншот нечіткий / відсутні деталі переказу",
+    }
+
+    if reason_code == "other":
+        await callback_query.message.answer("Введіть причину відхилення текстом:")
+        return
+
+    reason = reasons.get(reason_code, "Невідома причина")
+    await finalize_payment_rejection(callback_query.message, state, session, bot, reason)
+
+# --- RECEIVE REJECT REASON TEXT ---
+@router.message(StateFilter(PaymentStates.waiting_reject_reason))
+async def process_reject_reason_text(message: Message, state: FSMContext, session: AsyncSession, bot: Bot):
+    if not await is_admin(message.from_user.id, session):
+        await state.clear()
+        return
+
+    reason = message.text.strip() if message.text else "Не вказано"
+    await finalize_payment_rejection(message, state, session, bot, reason)
+
+async def finalize_payment_rejection(message: Message, state: FSMContext, session: AsyncSession, bot: Bot, reason: str):
+    state_data = await state.get_data()
+    booking_id = state_data["reject_booking_id"]
+    original_msg_id = state_data["reject_message_id"]
+    back_callback = state_data["reject_back_callback"]
+
+    # Reject payment in DB
+    await reject_payment(session, booking_id, reason)
+
+    # Revert booking status to awaiting_payment
+    b = await session.get(Booking, booking_id)
+    if b:
+        b.status = BookingStatus.awaiting_payment
+        await session.commit()
+
+        # Log activity
+        await log_activity(
+            session=session,
+            action_type="payment_rejected",
+            details=f"Адмін відхилив оплату для броні #{b.id} (Шатро №{b.shelter_num}, {b.booking_date.strftime('%d.%m.%Y')}, {b.client_name}). Причина: {reason}",
+            booking_id=b.id,
+            user_id=message.chat.id
+        )
+
+        # Notify client with card details and comments
+        date_str = b.booking_date.strftime("%d.%m.%Y")
+        comment = f"{b.client_name} {date_str}"
+        cleaned_card = "".join(filter(str.isdigit, settings.MONOBANK_CARD))
+        formatted_card = " ".join(cleaned_card[i:i+4] for i in range(0, len(cleaned_card), 4))
+
+        from bot.keyboards.payment_kb import retry_payment_kb
+        try:
+            user_text = (
+                "❌ <b>Оплату не підтверджено!</b>\n\n"
+                f"<b>Причина:</b> <i>{reason}</i>\n\n"
+                "Будь ласка, здійсніть оплату повторно та надішліть новий скріншот.\n\n"
+                f"💳 <b>Карта Monobank:</b> <code>{formatted_card}</code>\n"
+                f"👤 <b>Отримувач:</b> {settings.MONOBANK_CARD_OWNER}\n\n"
+                f"📝 <b>Коментар:</b> <code>{comment}</code>"
+            )
+            await bot.send_message(
+                chat_id=b.user_id,
+                text=user_text,
+                parse_mode="HTML",
+                reply_markup=retry_payment_kb(booking_id)
+            )
+        except Exception:
+            pass
+
+        # Update admin message
+        try:
+            # Delete the prompt asking for reason
+            await message.delete()
+        except Exception:
+            pass
+
+        # Update original alert card caption
+        try:
+            if back_callback:
+                # If from details view, refresh the view
+                b_status_label = "⏳ Очікує оплати"
+                comment_text = f"\n📝 <b>Причина скасування/відхилення:</b> <i>{reason}</i>"
+                created_at_str = b.created_at.strftime("%H:%M %d.%m.%Y")
+                from bot.keyboards.admin_kb import get_booking_details_kb
+                details_text = (
+                    f"📌 <b>Деталі заявки #{b.id}</b>\n\n"
+                    f"🛖 <b>Шатро:</b> Шатро №{b.shelter_num}\n"
+                    f"📅 <b>Дата:</b> {b.booking_date.strftime('%d.%m.%Y')}\n"
+                    f"👥 <b>Місткість:</b> 2 дорослих (фіксовано)\n\n"
+                    f"👤 <b>Клієнт:</b> {b.client_name}\n"
+                    f"📞 <b>Телефон:</b> {b.client_phone}\n\n"
+                    f"🚦 <b>Статус:</b> {b_status_label}"
+                    f"{comment_text}\n"
+                    f"🕐 <b>Подано:</b> {created_at_str}"
+                )
+                await bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=original_msg_id,
+                    text=details_text,
+                    reply_markup=get_booking_details_kb(b.id, b.status.value, back_callback)
+                )
+            else:
+                try:
+                    await bot.edit_message_caption(
+                        chat_id=message.chat.id,
+                        message_id=original_msg_id,
+                        caption=f"❌ <b>ОПЛАТУ ВІДХИЛЕНО. Причина: {reason}</b>",
+                        parse_mode="HTML",
+                        reply_markup=None
+                    )
+                except Exception:
+                    await bot.edit_message_text(
+                        chat_id=message.chat.id,
+                        message_id=original_msg_id,
+                        text=f"❌ <b>ОПЛАТУ ВІДХИЛЕНО. Причина: {reason}</b>",
+                        reply_markup=None
+                    )
+        except Exception:
+            pass
+
+        await message.answer(f"✅ Відхилення оплати надіслано. Причина: {reason}")
+    else:
+        await message.answer("Бронювання не знайдено.")
+        
+    await state.clear()

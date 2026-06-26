@@ -68,3 +68,39 @@ def setup_scheduler(scheduler: AsyncIOScheduler, bot: Bot):
                         )
                     except Exception:
                         pass
+
+    @scheduler.scheduled_job("interval", minutes=30)
+    async def auto_cancel_expired_payments():
+        from bot.database.engine import async_session
+        from bot.database.queries import get_expired_payment_bookings, log_activity
+        from bot.database.models import BookingStatus
+        
+        async with async_session() as session:
+            expired = await get_expired_payment_bookings(session)
+            if not expired:
+                return
+                
+            for booking in expired:
+                booking.status = BookingStatus.cancelled
+                booking.admin_comment = "Автоскасування: оплата не надійшла вчасно"
+                await session.commit()
+                
+                # Log activity
+                await log_activity(
+                    session=session,
+                    action_type="cancelled",
+                    details=f"Система автоматично скасувала бронь #{booking.id} (Шатро №{booking.shelter_num}, {booking.booking_date.strftime('%d.%m.%Y')}), причина: оплата не надійшла вчасно (24 год)",
+                    booking_id=booking.id
+                )
+                
+                # Notify client
+                try:
+                    user_text = (
+                        "⏰ <b>Бронювання автоматично скасовано!</b>\n\n"
+                        f"🛖 Шатро №{booking.shelter_num}  |  📅 {booking.booking_date.strftime('%d.%m.%Y')}\n\n"
+                        "На жаль, оплата не надійшла протягом встановленого часу (24 години).\n"
+                        "Шатро знову вільне для бронювання. Ви можете оформити нову заявку через /start."
+                    )
+                    await bot.send_message(chat_id=booking.user_id, text=user_text, parse_mode="HTML")
+                except Exception:
+                    pass

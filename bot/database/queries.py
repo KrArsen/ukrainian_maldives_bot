@@ -46,8 +46,18 @@ async def is_shelter_available(session: AsyncSession, shelter_num: int, booking_
     return result.scalar_one_or_none() is None
 
 async def create_booking(session: AsyncSession, user_id: int, shelter_num: int, booking_date: date, client_name: str, client_phone: str) -> Booking:
-    b = Booking(user_id=user_id, shelter_num=shelter_num, booking_date=booking_date,
-                client_name=client_name, client_phone=client_phone)
+    from datetime import datetime, timedelta
+    from bot.config import settings
+    deadline = datetime.utcnow() + timedelta(hours=settings.PAYMENT_TIMEOUT_HOURS)
+    b = Booking(
+        user_id=user_id,
+        shelter_num=shelter_num,
+        booking_date=booking_date,
+        client_name=client_name,
+        client_phone=client_phone,
+        status=BookingStatus.awaiting_payment,
+        payment_deadline=deadline
+    )
     session.add(b)
     await session.commit()
     await session.refresh(b)
@@ -61,7 +71,7 @@ async def get_user_bookings(session: AsyncSession, user_id: int) -> list[Booking
 
 async def get_pending_bookings(session: AsyncSession) -> list[Booking]:
     result = await session.execute(
-        select(Booking).where(Booking.status == BookingStatus.pending).order_by(Booking.created_at)
+        select(Booking).where(Booking.status == BookingStatus.payment_pending_review).order_by(Booking.created_at)
     )
     return list(result.scalars().all())
 
@@ -107,5 +117,66 @@ async def get_recent_activity(session: AsyncSession, limit: int = 20) -> list:
     from bot.database.models import ActivityLog
     result = await session.execute(
         select(ActivityLog).order_by(ActivityLog.created_at.desc()).limit(limit)
+    )
+    return list(result.scalars().all())
+
+async def create_payment(session: AsyncSession, booking_id: int, amount: float, card: str, comment: str):
+    from bot.database.models import Payment
+    payment = Payment(
+        booking_id=booking_id,
+        amount=amount,
+        monobank_card=card,
+        payment_comment=comment,
+        status="pending"
+    )
+    session.add(payment)
+    await session.commit()
+    return payment
+
+async def save_payment_screenshot(session: AsyncSession, booking_id: int, file_id: str):
+    from bot.database.models import Payment
+    result = await session.execute(
+        select(Payment).where(Payment.booking_id == booking_id)
+                       .order_by(Payment.created_at.desc())
+    )
+    payment = result.scalar_one_or_none()
+    if payment:
+        payment.screenshot_file_id = file_id
+        payment.status = "screenshot_sent"
+    await session.commit()
+
+async def confirm_payment(session: AsyncSession, booking_id: int, confirmed_by: int):
+    from bot.database.models import Payment
+    from datetime import datetime
+    result = await session.execute(
+        select(Payment).where(Payment.booking_id == booking_id)
+                       .order_by(Payment.created_at.desc())
+    )
+    payment = result.scalar_one_or_none()
+    if payment:
+        payment.status = "confirmed"
+        payment.confirmed_at = datetime.utcnow()
+        payment.confirmed_by = confirmed_by
+    await session.commit()
+
+async def reject_payment(session: AsyncSession, booking_id: int, reason: str):
+    from bot.database.models import Payment
+    result = await session.execute(
+        select(Payment).where(Payment.booking_id == booking_id)
+                       .order_by(Payment.created_at.desc())
+    )
+    payment = result.scalar_one_or_none()
+    if payment:
+        payment.status = "rejected"
+        payment.rejection_reason = reason
+    await session.commit()
+
+async def get_expired_payment_bookings(session: AsyncSession) -> list[Booking]:
+    from datetime import datetime
+    result = await session.execute(
+        select(Booking).where(
+            Booking.status == BookingStatus.awaiting_payment,
+            Booking.payment_deadline <= datetime.utcnow()
+        )
     )
     return list(result.scalars().all())

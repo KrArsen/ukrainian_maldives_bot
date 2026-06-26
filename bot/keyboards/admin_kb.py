@@ -22,12 +22,13 @@ def get_booking_details_kb(booking_id: int, status: str, back_callback: str) -> 
     buttons = []
     
     action_row = []
-    # If the booking is not confirmed yet, allow confirming it
-    if status != "confirmed":
-        action_row.append(InlineKeyboardButton(text="✅ Підтвердити", callback_data=f"adm_confirm_{booking_id}_{back_callback}"))
-    # If the booking is not cancelled, allow cancelling it
-    if status != "cancelled":
-        action_row.append(InlineKeyboardButton(text="❌ Скасувати", callback_data=f"adm_cancel_{booking_id}_{back_callback}"))
+    if status == "payment_pending_review":
+        action_row.append(InlineKeyboardButton(text="✅ Схвалити оплату", callback_data=f"adm_pay_confirm_{booking_id}_{back_callback}"))
+        action_row.append(InlineKeyboardButton(text="❌ Відхилити оплату", callback_data=f"adm_pay_reject_{booking_id}_{back_callback}"))
+    else:
+        # If the booking is not cancelled, allow cancelling it
+        if status != "cancelled":
+            action_row.append(InlineKeyboardButton(text="❌ Скасувати", callback_data=f"adm_cancel_{booking_id}_{back_callback}"))
         
     if action_row:
         buttons.append(action_row)
