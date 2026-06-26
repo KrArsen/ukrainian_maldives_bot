@@ -7,7 +7,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from bot.config import settings
 from bot.database.engine import init_db
-from bot.handlers import start, booking, my_bookings, admin, payment
+from bot.handlers import start, booking, my_bookings, payment
+from bot.handlers.admin import admin_router
 from bot.middlewares.db_middleware import DatabaseMiddleware
 from bot.services.scheduler import setup_scheduler
 
@@ -22,7 +23,7 @@ async def main():
     dp.include_router(start.router)
     dp.include_router(booking.router)
     dp.include_router(my_bookings.router)
-    dp.include_router(admin.router)
+    dp.include_router(admin_router)
     dp.include_router(payment.router)
 
     await init_db()

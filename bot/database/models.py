@@ -16,6 +16,9 @@ class User(Base):
     username:    Mapped[str|None]  = mapped_column(String(50))
     full_name:   Mapped[str|None]  = mapped_column(String(100))
     is_admin:    Mapped[bool]      = mapped_column(Boolean, default=False)
+    is_banned:   Mapped[bool]      = mapped_column(Boolean, default=False)
+    ban_reason:  Mapped[str|None]  = mapped_column(String(255), nullable=True)
+    banned_at:   Mapped[datetime|None] = mapped_column(DateTime, nullable=True)
     created_at:  Mapped[datetime]  = mapped_column(DateTime, default=datetime.utcnow)
 
 class Booking(Base):
@@ -29,6 +32,7 @@ class Booking(Base):
     status:        Mapped[BookingStatus] = mapped_column(Enum(BookingStatus), default=BookingStatus.awaiting_payment)
     admin_comment: Mapped[str|None]      = mapped_column(Text)
     payment_deadline: Mapped[datetime|None] = mapped_column(DateTime, nullable=True)
+    cancelled_by:  Mapped[int|None]      = mapped_column(BigInteger, nullable=True)
     created_at:    Mapped[datetime]      = mapped_column(DateTime, default=datetime.utcnow)
 
     payments: Mapped[list["Payment"]] = relationship(back_populates="booking", cascade="all, delete-orphan")
@@ -57,3 +61,8 @@ class Payment(Base):
     confirmed_by: Mapped[int|None] = mapped_column(BigInteger, nullable=True)
 
     booking: Mapped["Booking"] = relationship(back_populates="payments")
+
+class Setting(Base):
+    __tablename__ = "settings"
+    key: Mapped[str]   = mapped_column(String(50), primary_key=True)
+    value: Mapped[str] = mapped_column(String(255), nullable=False)

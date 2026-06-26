@@ -13,7 +13,8 @@ from bot.database.queries import (
     create_booking,
     get_booked_shelters_on_date,
     log_activity,
-    create_payment
+    create_payment,
+    get_booking_price
 )
 from bot.keyboards.booking_kb import (
     get_booking_dates_kb,
@@ -200,10 +201,8 @@ async def process_booking_confirmed(callback_query: CallbackQuery, state: FSMCon
         client_phone=data["client_phone"]
     )
     
-    # Calculate price based on weekday/weekend
-    # weekday() returns 0 for Monday ... 4 for Friday, 5 for Saturday, 6 for Sunday
-    is_weekend = booking_date.weekday() in (4, 5, 6) # Friday, Saturday, Sunday
-    price = settings.WEEKEND_PRICE if is_weekend else settings.WEEKDAY_PRICE
+    # Calculate price based on database setting or weekday/weekend fallback
+    price = await get_booking_price(session, booking_date)
     
     # Create payment record
     comment = f"{booking.client_name} {date_ua_format}"

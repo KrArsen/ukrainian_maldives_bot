@@ -11,7 +11,8 @@ from bot.states.payment_states import PaymentStates
 from bot.database.models import Booking, BookingStatus, User
 from bot.database.queries import (
     save_payment_screenshot,
-    log_activity
+    log_activity,
+    get_booking_price
 )
 from bot.keyboards.payment_kb import (
     admin_payment_review_kb,
@@ -89,9 +90,8 @@ async def receive_screenshot(message: Message, state: FSMContext, session: Async
     db_admins_res = await session.execute(select(User.telegram_id).where(User.is_admin == True))
     all_admin_ids = set(settings.ADMIN_IDS) | {row[0] for row in db_admins_res.fetchall()}
 
-    # Calculate price based on weekday/weekend
-    is_weekend = booking.booking_date.weekday() in (4, 5, 6) # Friday, Saturday, Sunday
-    price = settings.WEEKEND_PRICE if is_weekend else settings.WEEKDAY_PRICE
+    # Calculate price based on database setting or weekday/weekend fallback
+    price = await get_booking_price(session, booking.booking_date)
 
     # Send screenshot with details to all admins
     admin_caption = (
