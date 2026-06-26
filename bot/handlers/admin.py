@@ -284,11 +284,19 @@ async def callback_admin_view_booking(callback_query: CallbackQuery, session: As
         f"🕐 <b>Подано:</b> {created_at_str}"
     )
     
+    # Check if there is a payment screenshot
+    from bot.database.models import Payment
+    payment_res = await session.execute(
+        select(Payment).where(Payment.booking_id == booking_id).order_by(Payment.created_at.desc())
+    )
+    payment = payment_res.scalar_one_or_none()
+    has_screenshot = payment is not None and bool(payment.screenshot_file_id)
+
     await bot.edit_message_text(
         chat_id=callback_query.message.chat.id,
         message_id=callback_query.message.message_id,
         text=text,
-        reply_markup=get_booking_details_kb(b.id, b.status.value, back_callback)
+        reply_markup=get_booking_details_kb(b.id, b.status.value, back_callback, has_screenshot=has_screenshot)
     )
 
 # Confirm booking action
@@ -761,3 +769,57 @@ async def finalize_payment_rejection(message: Message, state: FSMContext, sessio
         await message.answer("Бронювання не знайдено.")
         
     await state.clear()
+
+# --- ADMIN VIEW SCREENSHOT FROM DETAILS ---
+@router.callback_query(F.data.startswith("adm_show_pay_"))
+async def callback_admin_show_pay_screenshot(callback_query: CallbackQuery, session: AsyncSession, bot: Bot):
+    if not await is_admin(callback_query.from_user.id, session):
+        await callback_query.answer()
+        return
+
+    await callback_query.answer()
+    parts = callback_query.data.split("_")
+    booking_id = int(parts[3])
+    
+    # Fetch payment
+    from bot.database.models import Payment
+    payment_res = await session.execute(
+        select(Payment).where(Payment.booking_id == booking_id).order_by(Payment.created_at.desc())
+    )
+    payment = payment_res.scalar_one_or_none()
+    
+    if not payment or not payment.screenshot_file_id:
+        await callback_query.answer("Чек не знайдено в базі.", show_alert=True)
+        return
+
+    b = await session.get(Booking, booking_id)
+    if not b:
+        await callback_query.answer("Бронювання не знайдено.", show_alert=True)
+        return
+
+    date_str = b.booking_date.strftime("%d.%m.%Y")
+    caption = (
+        f"📸 <b>Чек про оплату для замовлення #{b.id}</b>\n\n"
+        f"🛖 Шатро №{b.shelter_num} | 📅 {date_str}\n"
+        f"👤 Клієнт: {b.client_name}\n"
+        f"💰 Сума: {payment.amount} грн\n"
+        f"🚦 Статус оплати: {payment.status}"
+    )
+
+    try:
+        await bot.send_photo(
+            chat_id=callback_query.message.chat.id,
+            photo=payment.screenshot_file_id,
+            caption=caption,
+            parse_mode="HTML"
+        )
+    except Exception:
+        try:
+            await bot.send_document(
+                chat_id=callback_query.message.chat.id,
+                document=payment.screenshot_file_id,
+                caption=caption,
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            await callback_query.answer(f"Помилка відправки чеку: {e}", show_alert=True)

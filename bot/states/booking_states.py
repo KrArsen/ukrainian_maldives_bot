@@ -10,3 +10,4 @@ class BookingFSM(StatesGroup):
 
 class AdminFSM(StatesGroup):
     waiting_cancel_reason = State()
+    waiting_search_query = State()

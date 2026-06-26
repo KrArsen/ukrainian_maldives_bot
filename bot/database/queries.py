@@ -16,7 +16,7 @@ async def get_booked_shelters_on_date(session: AsyncSession, booking_date: date)
     result = await session.execute(
         select(Booking.shelter_num).where(
             Booking.booking_date == booking_date,
-            Booking.status.in_([BookingStatus.pending, BookingStatus.confirmed])
+            Booking.status.in_([BookingStatus.awaiting_payment, BookingStatus.payment_pending_review, BookingStatus.confirmed])
         )
     )
     return set(row[0] for row in result.fetchall())
@@ -28,7 +28,7 @@ async def get_fully_booked_dates(session: AsyncSession, year: int, month: int) -
         .where(
             func.strftime('%Y', Booking.booking_date) == str(year),
             func.strftime('%m', Booking.booking_date) == f"{month:02d}",
-            Booking.status.in_([BookingStatus.pending, BookingStatus.confirmed])
+            Booking.status.in_([BookingStatus.awaiting_payment, BookingStatus.payment_pending_review, BookingStatus.confirmed])
         )
         .group_by(Booking.booking_date)
         .having(func.count(Booking.shelter_num) >= 10)
@@ -40,7 +40,7 @@ async def is_shelter_available(session: AsyncSession, shelter_num: int, booking_
         select(Booking).where(
             Booking.shelter_num == shelter_num,
             Booking.booking_date == booking_date,
-            Booking.status.in_([BookingStatus.pending, BookingStatus.confirmed])
+            Booking.status.in_([BookingStatus.awaiting_payment, BookingStatus.payment_pending_review, BookingStatus.confirmed])
         )
     )
     return result.scalar_one_or_none() is None
@@ -85,7 +85,7 @@ async def get_bookings_on_date(session: AsyncSession, target_date: date) -> list
     result = await session.execute(
         select(Booking).where(
             Booking.booking_date == target_date,
-            Booking.status.in_([BookingStatus.pending, BookingStatus.confirmed])
+            Booking.status.in_([BookingStatus.awaiting_payment, BookingStatus.payment_pending_review, BookingStatus.confirmed])
         ).order_by(Booking.shelter_num)
     )
     return list(result.scalars().all())

@@ -17,7 +17,7 @@ def get_admin_main_kb() -> InlineKeyboardMarkup:
         ]
     ])
 
-def get_booking_details_kb(booking_id: int, status: str, back_callback: str) -> InlineKeyboardMarkup:
+def get_booking_details_kb(booking_id: int, status: str, back_callback: str, has_screenshot: bool = False) -> InlineKeyboardMarkup:
     """Returns inline action buttons for managing a specific booking."""
     buttons = []
     
@@ -32,6 +32,11 @@ def get_booking_details_kb(booking_id: int, status: str, back_callback: str) -> 
         
     if action_row:
         buttons.append(action_row)
+        
+    if has_screenshot:
+        buttons.append([
+            InlineKeyboardButton(text="📸 Переглянути чек", callback_data=f"adm_show_pay_{booking_id}_{back_callback}")
+        ])
         
     buttons.append([
         InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_{back_callback}")
