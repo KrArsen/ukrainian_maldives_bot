@@ -243,10 +243,17 @@ async def process_booking_confirmed(callback_query: CallbackQuery, state: FSMCon
     from bot.keyboards.admin_kb import get_pending_booking_actions_kb
     admin_kb = get_pending_booking_actions_kb(booking.id)
     
-    for admin_id in settings.ADMIN_IDS:
+    # Get all admin IDs from both config (.env) and database
+    from bot.database.models import User
+    from sqlalchemy import select
+    db_admins_res = await session.execute(select(User.telegram_id).where(User.is_admin == True))
+    all_admin_ids = set(settings.ADMIN_IDS) | {row[0] for row in db_admins_res.fetchall()}
+    
+    for admin_id in all_admin_ids:
         try:
             await bot.send_message(chat_id=admin_id, text=admin_text, reply_markup=admin_kb)
         except Exception:
             pass
             
     await state.clear()
+

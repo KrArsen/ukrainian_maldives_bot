@@ -13,6 +13,12 @@ def setup_scheduler(scheduler: AsyncIOScheduler, bot: Bot):
         today = date.today()
         async with async_session() as session:
             bookings = await get_bookings_on_date(session, today)
+            # Get all admin IDs from both config (.env) and database
+            from bot.database.models import User
+            from sqlalchemy import select
+            db_admins_res = await session.execute(select(User.telegram_id).where(User.is_admin == True))
+            all_admin_ids = set(settings.ADMIN_IDS) | {row[0] for row in db_admins_res.fetchall()}
+            
         if not bookings:
             text = f"📅 На сьогодні ({today.strftime('%d.%m.%Y')}) бронювань немає."
         else:
@@ -25,11 +31,13 @@ def setup_scheduler(scheduler: AsyncIOScheduler, bot: Bot):
             if free:
                 lines.append(f"\nВільні: №{', №'.join(free)}")
             text = "\n".join(lines)
-        for admin_id in settings.ADMIN_IDS:
+            
+        for admin_id in all_admin_ids:
             try:
                 await bot.send_message(admin_id, text, parse_mode="HTML")
             except Exception:
                 pass
+
 
     @scheduler.scheduled_job("cron", hour=18, minute=0, timezone="Europe/Kyiv")
     async def remind_tomorrow():
