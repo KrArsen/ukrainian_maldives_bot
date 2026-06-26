@@ -8,7 +8,7 @@ from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.config import settings
-from bot.database.models import BookingStatus, Booking
+from bot.database.models import BookingStatus, Booking, User
 from bot.database.queries import (
     get_pending_bookings,
     get_all_bookings,
@@ -29,13 +29,16 @@ router = Router()
 
 ITEMS_PER_PAGE = 5
 
-def is_admin(user_id: int) -> bool:
-    return user_id in settings.ADMIN_IDS
+async def is_admin(user_id: int, session: AsyncSession) -> bool:
+    if user_id in settings.ADMIN_IDS:
+        return True
+    user = await session.get(User, user_id)
+    return user is not None and user.is_admin
 
 @router.message(Command("admin"))
-async def cmd_admin(message: Message):
+async def cmd_admin(message: Message, session: AsyncSession):
     """Admin control panel welcome screen."""
-    if not is_admin(message.from_user.id):
+    if not await is_admin(message.from_user.id, session):
         return
         
     await message.answer(
@@ -45,8 +48,8 @@ async def cmd_admin(message: Message):
 
 # Callback to view main panel menu again
 @router.callback_query(F.data == "admin_menu")
-async def callback_admin_menu(callback_query: CallbackQuery, bot: Bot):
-    if not is_admin(callback_query.from_user.id):
+async def callback_admin_menu(callback_query: CallbackQuery, bot: Bot, session: AsyncSession):
+    if not await is_admin(callback_query.from_user.id, session):
         await callback_query.answer()
         return
     await callback_query.answer()
@@ -58,8 +61,8 @@ async def callback_admin_menu(callback_query: CallbackQuery, bot: Bot):
     )
 
 @router.callback_query(F.data == "admin_close_panel")
-async def callback_admin_close(callback_query: CallbackQuery, bot: Bot):
-    if not is_admin(callback_query.from_user.id):
+async def callback_admin_close(callback_query: CallbackQuery, bot: Bot, session: AsyncSession):
+    if not await is_admin(callback_query.from_user.id, session):
         await callback_query.answer()
         return
     await callback_query.answer()
@@ -71,7 +74,7 @@ async def callback_admin_close(callback_query: CallbackQuery, bot: Bot):
 # 🔔 Нові заявки (Pending bookings list)
 @router.callback_query(F.data == "admin_pending")
 async def callback_admin_pending(callback_query: CallbackQuery, session: AsyncSession, bot: Bot):
-    if not is_admin(callback_query.from_user.id):
+    if not await is_admin(callback_query.from_user.id, session):
         await callback_query.answer()
         return
         
@@ -156,7 +159,7 @@ async def show_bookings_on_date_internal(chat_id: int, target_date: date, back_c
         await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
 
 async def show_bookings_on_target_date(callback_query: CallbackQuery, target_date: date, back_callback: str, session: AsyncSession, bot: Bot):
-    if not is_admin(callback_query.from_user.id):
+    if not await is_admin(callback_query.from_user.id, session):
         await callback_query.answer()
         return
     await callback_query.answer()
@@ -222,7 +225,7 @@ async def show_all_bookings_internal(chat_id: int, page: int, session: AsyncSess
 
 @router.callback_query(F.data.startswith("admin_all_"))
 async def callback_admin_all(callback_query: CallbackQuery, session: AsyncSession, bot: Bot):
-    if not is_admin(callback_query.from_user.id):
+    if not await is_admin(callback_query.from_user.id, session):
         await callback_query.answer()
         return
         
@@ -239,7 +242,7 @@ async def callback_admin_all(callback_query: CallbackQuery, session: AsyncSessio
 # Booking Details view handler
 @router.callback_query(F.data.startswith("adm_view_"))
 async def callback_admin_view_booking(callback_query: CallbackQuery, session: AsyncSession, bot: Bot):
-    if not is_admin(callback_query.from_user.id):
+    if not await is_admin(callback_query.from_user.id, session):
         await callback_query.answer()
         return
         
@@ -284,7 +287,7 @@ async def callback_admin_view_booking(callback_query: CallbackQuery, session: As
 # Confirm booking action
 @router.callback_query(F.data.startswith("adm_confirm_"))
 async def callback_confirm_booking(callback_query: CallbackQuery, session: AsyncSession, bot: Bot):
-    if not is_admin(callback_query.from_user.id):
+    if not await is_admin(callback_query.from_user.id, session):
         await callback_query.answer()
         return
         
@@ -327,8 +330,8 @@ async def callback_confirm_booking(callback_query: CallbackQuery, session: Async
 
 # Cancel booking action (Starts FSM for cancel reason)
 @router.callback_query(F.data.startswith("adm_cancel_"))
-async def callback_cancel_booking_request(callback_query: CallbackQuery, state: FSMContext, bot: Bot):
-    if not is_admin(callback_query.from_user.id):
+async def callback_cancel_booking_request(callback_query: CallbackQuery, state: FSMContext, bot: Bot, session: AsyncSession):
+    if not await is_admin(callback_query.from_user.id, session):
         await callback_query.answer()
         return
         
@@ -354,7 +357,7 @@ async def callback_cancel_booking_request(callback_query: CallbackQuery, state: 
 # Receive cancellation reason text
 @router.message(StateFilter(AdminFSM.waiting_cancel_reason))
 async def process_cancel_reason(message: Message, state: FSMContext, session: AsyncSession, bot: Bot):
-    if not is_admin(message.from_user.id):
+    if not await is_admin(message.from_user.id, session):
         await state.clear()
         return
         
@@ -475,7 +478,7 @@ async def show_activity_log_internal(chat_id: int, session: AsyncSession, bot: B
 
 @router.callback_query(F.data == "admin_activity_log")
 async def callback_admin_activity_log(callback_query: CallbackQuery, session: AsyncSession, bot: Bot):
-    if not is_admin(callback_query.from_user.id):
+    if not await is_admin(callback_query.from_user.id, session):
         await callback_query.answer()
         return
     await callback_query.answer()
@@ -488,7 +491,7 @@ async def callback_admin_activity_log(callback_query: CallbackQuery, session: As
 
 @router.callback_query(F.data == "admin_activity_refresh")
 async def callback_admin_activity_refresh(callback_query: CallbackQuery, session: AsyncSession, bot: Bot):
-    if not is_admin(callback_query.from_user.id):
+    if not await is_admin(callback_query.from_user.id, session):
         await callback_query.answer()
         return
     await callback_query.answer("Дані оновлено!")
