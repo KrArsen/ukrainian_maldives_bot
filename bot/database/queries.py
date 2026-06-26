@@ -139,7 +139,7 @@ async def save_payment_screenshot(session: AsyncSession, booking_id: int, file_i
         select(Payment).where(Payment.booking_id == booking_id)
                        .order_by(Payment.created_at.desc())
     )
-    payment = result.scalar_one_or_none()
+    payment = result.scalars().first()
     if payment:
         payment.screenshot_file_id = file_id
         payment.status = "screenshot_sent"
@@ -152,7 +152,7 @@ async def confirm_payment(session: AsyncSession, booking_id: int, confirmed_by: 
         select(Payment).where(Payment.booking_id == booking_id)
                        .order_by(Payment.created_at.desc())
     )
-    payment = result.scalar_one_or_none()
+    payment = result.scalars().first()
     if payment:
         payment.status = "confirmed"
         payment.confirmed_at = datetime.utcnow()
@@ -165,7 +165,7 @@ async def reject_payment(session: AsyncSession, booking_id: int, reason: str):
         select(Payment).where(Payment.booking_id == booking_id)
                        .order_by(Payment.created_at.desc())
     )
-    payment = result.scalar_one_or_none()
+    payment = result.scalars().first()
     if payment:
         payment.status = "rejected"
         payment.rejection_reason = reason
