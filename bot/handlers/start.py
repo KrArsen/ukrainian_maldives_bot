@@ -1,11 +1,16 @@
 # bot/handlers/start.py
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery
 from bot.keyboards.main_menu import get_main_menu
 from bot.config import settings
 
 router = Router()
+
+# Catch-all for non-interactive "display" buttons (pagination counters, disabled dates, labels)
+@router.callback_query(F.data == "ignore")
+async def callback_ignore(callback: CallbackQuery):
+    await callback.answer()
 
 @router.message(CommandStart())
 async def cmd_start(message: Message):

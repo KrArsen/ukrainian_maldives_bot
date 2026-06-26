@@ -133,7 +133,8 @@ async def callback_view_payment(callback_query: CallbackQuery, session: AsyncSes
         chat_id=callback_query.message.chat.id,
         photo=payment.screenshot_file_id,
         caption=caption,
-        reply_markup=kb
+        reply_markup=kb,
+        parse_mode="HTML"
     )
 
 # Approve Payment
@@ -166,12 +167,13 @@ async def callback_approve_payment(callback_query: CallbackQuery, session: Async
                     f"🛖 Шатро №{b.shelter_num}\n"
                     f"📅 {b.booking_date.strftime('%d.%m.%Y')}\n\n"
                     f"Чекаємо на вас! З усіх питань звертайтесь за телефоном: {settings.RESORT_PHONE}"
-                )
+                ),
+                parse_mode="HTML"
             )
         except Exception:
             pass
             
-    # Delete photo message
+    # Delete current message (photo or text)
     try:
         await bot.delete_message(
             chat_id=callback_query.message.chat.id,
@@ -180,23 +182,8 @@ async def callback_approve_payment(callback_query: CallbackQuery, session: Async
     except Exception:
         pass
         
-    # Redirect back
-    if back_cb.startswith("admin_payments_"):
-        page = int(back_cb.split("_")[-1]) if back_cb.split("_")[-1].isdigit() else 1
-        await show_payments_list_internal(callback_query.message, page, session, bot)
-    elif back_cb.startswith("ab_v:"):
-        # Go back to details view: we send a new details message (since we deleted the photo message)
-        # To reuse ab_v details logic, we can construct a fake message and delegate
-        from bot.handlers.admin.bookings import callback_booking_details
-        callback_query.data = back_cb
-        # We need a text message, so we send one first
-        msg = await bot.send_message(chat_id=callback_query.message.chat.id, text="Завантаження деталей...")
-        callback_query.message = msg
-        await callback_booking_details(callback_query, session, bot)
-    else:
-        # Fallback to main menu
-        from bot.handlers.admin.main_menu import cmd_admin
-        await cmd_admin(callback_query.message, session, None)
+    # Redirect back using shared helper
+    await _redirect_after_payment_action(callback_query, back_cb, session, bot)
 
 # Show rejection options
 @router.callback_query(F.data.startswith("ap_rj:"))
@@ -212,12 +199,35 @@ async def callback_reject_payment_options(callback_query: CallbackQuery, session
     
     kb = get_payment_rejection_reasons_kb(booking_id, back_cb)
     
-    await bot.edit_message_caption(
-        chat_id=callback_query.message.chat.id,
-        message_id=callback_query.message.message_id,
-        caption="⚠️ <b>Оберіть або введіть причину відхилення оплати:</b>",
-        reply_markup=kb
-    )
+    # If current message is a photo — edit caption; if text — edit text
+    if callback_query.message.photo or callback_query.message.document:
+        try:
+            await bot.edit_message_caption(
+                chat_id=callback_query.message.chat.id,
+                message_id=callback_query.message.message_id,
+                caption="⚠️ <b>Оберіть або введіть причину відхилення оплати:</b>",
+                reply_markup=kb,
+                parse_mode="HTML"
+            )
+            return
+        except Exception:
+            pass
+    # Fallback: edit text or send new message
+    try:
+        await bot.edit_message_text(
+            chat_id=callback_query.message.chat.id,
+            message_id=callback_query.message.message_id,
+            text="⚠️ <b>Оберіть або введіть причину відхилення оплати:</b>",
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+    except Exception:
+        await bot.send_message(
+            chat_id=callback_query.message.chat.id,
+            text="⚠️ <b>Оберіть або введіть причину відхилення оплати:</b>",
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
 
 # Perform Rejection (pre-defined or setup FSM for custom)
 @router.callback_query(F.data.startswith("ap_r:"))
@@ -333,26 +343,65 @@ async def finalize_payment_rejection_internal(
         text=f"✅ Оплату для бронювання #{booking_id} відхилено. Клієнту надіслано сповіщення."
     )
     
-    # Redirect back
-    if back_cb.startswith("admin_payments_"):
-        page = int(back_cb.split("_")[-1]) if back_cb.split("_")[-1].isdigit() else 1
-        # Create a dummy message to edit
-        msg = await bot.send_message(chat_id=message.chat.id, text="Завантаження списку...")
+    # Redirect back using shared helper
+    # We need a fake CallbackQuery since finalize runs from Message context too
+    fake_cb = CallbackQuery(
+        id="0",
+        from_user=message.from_user,
+        chat_instance="0",
+        message=message,
+        data=back_cb
+    )
+    await _redirect_after_payment_action(fake_cb, back_cb, session, bot)
+
+
+async def _redirect_after_payment_action(
+    callback_query: CallbackQuery,
+    back_cb: str,
+    session: AsyncSession,
+    bot: Bot
+):
+    """Shared redirect logic after approving or rejecting a payment."""
+    if back_cb == "admin_menu" or not back_cb:
+        from bot.keyboards.admin.main_kb import get_admin_main_kb
+        from bot.database.queries import count_bookings_by_status
+        pending_bookings = await count_bookings_by_status(session, "awaiting_payment")
+        pending_payments = await count_bookings_by_status(session, "payment_pending_review")
+        await bot.send_message(
+            chat_id=callback_query.message.chat.id,
+            text="🛠️ <b>Панель адміністратора «Українські Мальдіви»</b>",
+            reply_markup=get_admin_main_kb(pending_bookings, pending_payments),
+            parse_mode="HTML"
+        )
+    elif back_cb.startswith("admin_payments_") or back_cb.isdigit():
+        page = int(back_cb.split("_")[-1]) if not back_cb.isdigit() else int(back_cb)
+        if not page or page < 1:
+            page = 1
+        msg = await bot.send_message(chat_id=callback_query.message.chat.id, text="Завантаження списку...")
         await show_payments_list_internal(msg, page, session, bot)
-    elif back_cb.startswith("ab_v:"):
-        from bot.handlers.admin.bookings import callback_booking_details
-        # Simulate booking details query callback
-        # Send text first, then update it
-        msg = await bot.send_message(chat_id=message.chat.id, text="Завантаження деталей...")
+    elif back_cb.startswith("ab_v:") or back_cb.startswith("ab_l:"):
+        from bot.handlers.admin.bookings import callback_booking_details, callback_bookings_list_filtered
+        msg = await bot.send_message(chat_id=callback_query.message.chat.id, text="Завантаження...")
         fake_cb = CallbackQuery(
             id="0",
-            from_user=message.from_user,
+            from_user=callback_query.from_user,
             chat_instance="0",
             message=msg,
             data=back_cb
         )
-        await callback_booking_details(fake_cb, session, bot)
+        if back_cb.startswith("ab_v:"):
+            await callback_booking_details(fake_cb, session, bot)
+        else:
+            await callback_bookings_list_filtered(fake_cb, session, bot)
     else:
-        # Default back to main menu
-        from bot.handlers.admin.main_menu import cmd_admin
-        await cmd_admin(message, session, None)
+        # Fallback: send admin menu
+        from bot.keyboards.admin.main_kb import get_admin_main_kb
+        from bot.database.queries import count_bookings_by_status
+        pending_bookings = await count_bookings_by_status(session, "awaiting_payment")
+        pending_payments = await count_bookings_by_status(session, "payment_pending_review")
+        await bot.send_message(
+            chat_id=callback_query.message.chat.id,
+            text="🛠️ <b>Панель адміністратора «Українські Мальдіви»</b>",
+            reply_markup=get_admin_main_kb(pending_bookings, pending_payments),
+            parse_mode="HTML"
+        )

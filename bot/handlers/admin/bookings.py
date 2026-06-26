@@ -198,12 +198,23 @@ async def callback_booking_details(callback_query: CallbackQuery, session: Async
     
     kb = get_booking_details_kb(b.id, b.status, back_cb, has_screenshot=has_screenshot)
     
-    await bot.edit_message_text(
-        chat_id=callback_query.message.chat.id,
-        message_id=callback_query.message.message_id,
-        text=text,
-        reply_markup=kb
-    )
+    if callback_query.message.photo:
+        try:
+            await callback_query.message.delete()
+        except Exception:
+            pass
+        await bot.send_message(
+            chat_id=callback_query.message.chat.id,
+            text=text,
+            reply_markup=kb
+        )
+    else:
+        await bot.edit_message_text(
+            chat_id=callback_query.message.chat.id,
+            message_id=callback_query.message.message_id,
+            text=text,
+            reply_markup=kb
+        )
 
 # Approve / Confirm booking
 @router.callback_query(F.data.startswith("ab_ok:"))
@@ -346,6 +357,11 @@ async def callback_booking_screenshot(callback_query: CallbackQuery, session: As
     
     payment = await get_latest_payment(session, booking_id)
     if payment and payment.screenshot_file_id:
+        # Delete original details message
+        try:
+            await callback_query.message.delete()
+        except Exception:
+            pass
         # Show photo
         from bot.keyboards.admin.payments_kb import get_payment_review_kb
         # We can view using the back_cb back to details

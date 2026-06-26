@@ -1,6 +1,18 @@
 version: "3.8"
 
 services:
+  bot:
+    build: .
+    container_name: maldivi_bot
+    restart: always
+    volumes:
+      # Mount SQLite database and .env file to persist data and configuration
+      - ./bot.db:/app/bot.db
+      - ./.env:/app/.env
+    environment:
+      - TZ=Europe/Kyiv
+
+  # PostgreSQL database (Optional: if you decide to switch from SQLite to PostgreSQL in the future)
   db:
     image: postgres:16
     container_name: maldivi_db

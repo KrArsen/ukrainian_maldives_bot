@@ -274,6 +274,7 @@ async def process_booking_confirmed(callback_query: CallbackQuery, state: FSMCon
         f"👤 <b>Отримувач:</b> {settings.MONOBANK_CARD_OWNER}\n\n"
         "⚠️ <b>ВАЖЛИВО:</b> При переказі обов'язково вкажіть у коментарі:\n"
         f"📝 <code>{comment}</code>\n\n"
+        f"⚠️ <b>Також потрібно буде прикріпити скріншот оплати.</b>\n"
         "Після оплати натисніть кнопку нижче 👇"
     )
     

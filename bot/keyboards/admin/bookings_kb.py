@@ -34,8 +34,9 @@ def get_bookings_list_kb(
         date_str = b.booking_date.strftime("%d.%m")
         btn_text = f"🛖 №{b.shelter_num} | 📅 {date_str} | {b.client_name} ({status_icon})"
         
-        # Details callback: ab_v:booking_id:status:tent:sort:page
-        cb_details = f"ab_v:{b.id}:{status}:{tent}:{sort}:{page}"
+        # Details callback: ab_v:booking_id:ab_l:status:tent:sort:page
+        # back_cb will be "ab_l:{status}:{tent}:{sort}:{page}" which matches the list handler
+        cb_details = f"ab_v:{b.id}:ab_l:{status}:{tent}:{sort}:{page}"
         buttons.append([InlineKeyboardButton(text=btn_text, callback_data=cb_details)])
         
     # 2. Pagination row
