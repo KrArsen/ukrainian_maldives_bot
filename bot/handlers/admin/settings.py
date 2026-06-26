@@ -15,7 +15,8 @@ from bot.database.queries import (
     get_setting,
     set_setting,
     get_bookings_for_export,
-    log_activity
+    log_activity,
+    get_prices
 )
 from bot.keyboards.admin.settings_kb import (
     get_settings_kb,
@@ -28,20 +29,19 @@ from bot.handlers.admin.main_menu import is_admin
 router = Router()
 
 async def show_settings_dashboard(callback_query: CallbackQuery, session: AsyncSession, bot: Bot):
-    price_str = await get_setting(session, "booking_price")
+    weekday_price, weekend_price = await get_prices(session)
     timeout_str = await get_setting(session, "payment_timeout_hours")
-    
-    price_val = f"<b>{price_str} грн</b> (фіксована)" if price_str else f"Будні: {bot_settings.WEEKDAY_PRICE} грн, Вихідні: {bot_settings.WEEKEND_PRICE} грн (динамічна)"
     timeout_val = f"<b>{timeout_str} год</b>" if timeout_str else f"{bot_settings.PAYMENT_TIMEOUT_HOURS} год (за замовчуванням)"
     
     text = (
         f"⚙️ <b>Налаштування системи</b>\n\n"
-        f"💰 Поточна ціна: {price_val}\n"
+        f"💰 Будні ціна: <b>{weekday_price} грн</b>\n"
+        f"🌟 Вихідні ціна: <b>{weekend_price} грн</b>\n"
         f"⏱️ Таймаут оплати: {timeout_val}\n\n"
         f"Оберіть дію:"
     )
     
-    kb = get_settings_kb()
+    kb = get_settings_kb(weekday_price, weekend_price)
     
     await bot.edit_message_text(
         chat_id=callback_query.message.chat.id,
@@ -58,51 +58,60 @@ async def callback_settings(callback_query: CallbackQuery, session: AsyncSession
     await callback_query.answer()
     await show_settings_dashboard(callback_query, session, bot)
 
-# --- Booking Price Tuning ---
-@router.callback_query(F.data == "as_price")
-async def callback_price_change_request(callback_query: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot):
-    if not await is_admin(callback_query.from_user.id, session):
-        await callback_query.answer()
+# --- Weekday Price Configuration ---
+@router.callback_query(F.data == "admin_set_weekday_price")
+async def set_weekday_price(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    if not await is_admin(callback.from_user.id, session):
+        await callback.answer()
         return
-    await callback_query.answer()
-    
-    await state.set_state(AdminSettings.waiting_price_input)
-    await bot.send_message(
-        chat_id=callback_query.message.chat.id,
-        text=(
-            "💰 <b>Зміна ціни бронювання</b>\n\n"
-            "Введіть нову фіксовану ціну в гривнях (тільки число, наприклад: <code>2000</code>).\n"
-            "Або введіть <code>динамічна</code>, щоб бот автоматично вираховував ціни буднів та вихідних з config-файлу."
-        )
-    )
+    await callback.answer()
+    await state.set_state(AdminSettings.waiting_weekday_price)
+    await callback.message.answer("💰 Введіть нову ціну для буднів (грн):")
 
-@router.message(AdminSettings.waiting_price_input)
-async def process_price_input(message: Message, state: FSMContext, session: AsyncSession, bot: Bot):
+@router.message(AdminSettings.waiting_weekday_price)
+async def save_weekday_price(message: Message, state: FSMContext, session: AsyncSession, bot: Bot):
     if not await is_admin(message.from_user.id, session):
         await state.clear()
         return
-        
-    text = message.text.strip().lower()
-    
-    if text == "динамічна":
-        await set_setting(session, "booking_price", "")
-        await log_activity(session, "setting_change", "Адмін скинув ціну бронювання до динамічної", user_id=message.from_user.id)
-        await message.answer("✅ Ціну успішно скинуто до динамічного тарифу.")
-        await state.clear()
-    elif text.isdigit():
-        price = int(text)
-        if price < 100 or price > 20000:
-            await message.answer("❌ Будь ласка, введіть адекватну суму (від 100 до 20000 грн):")
-            return
-        await set_setting(session, "booking_price", text)
-        await log_activity(session, "setting_change", f"Адмін встановив фіксовану ціну: {price} грн", user_id=message.from_user.id)
-        await message.answer(f"✅ Встановлено фіксовану ціну: <b>{price} грн</b>.")
-        await state.clear()
-    else:
-        await message.answer("❌ Некоректний формат. Введіть число або напишіть «динамічна»:")
+    if not message.text.isdigit() or int(message.text) < 100:
+        await message.answer("⚠️ Введіть коректну суму (число від 100):")
         return
-        
-    # Send dashboard again as a new message
+    await set_setting(session, 'price_weekday', message.text)
+    await log_activity(session, "setting_change", f"Адмін змінив будню ціну: {message.text} грн", user_id=message.from_user.id)
+    await message.answer(f"✅ Ціна для буднів оновлена: <b>{message.text} грн</b>.")
+    await state.clear()
+    
+    # Reload dashboard
+    msg = await message.answer("Завантаження...")
+    fake_cb = CallbackQuery(
+        id="0", from_user=message.from_user, chat_instance="0", message=msg, data="admin_settings"
+    )
+    await show_settings_dashboard(fake_cb, session, bot)
+
+# --- Weekend Price Configuration ---
+@router.callback_query(F.data == "admin_set_weekend_price")
+async def set_weekend_price(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    if not await is_admin(callback.from_user.id, session):
+        await callback.answer()
+        return
+    await callback.answer()
+    await state.set_state(AdminSettings.waiting_weekend_price)
+    await callback.message.answer("🌟 Введіть нову ціну для вихідних (грн):")
+
+@router.message(AdminSettings.waiting_weekend_price)
+async def save_weekend_price(message: Message, state: FSMContext, session: AsyncSession, bot: Bot):
+    if not await is_admin(message.from_user.id, session):
+        await state.clear()
+        return
+    if not message.text.isdigit() or int(message.text) < 100:
+        await message.answer("⚠️ Введіть коректну суму (число від 100):")
+        return
+    await set_setting(session, 'price_weekend', message.text)
+    await log_activity(session, "setting_change", f"Адмін змінив вихідну ціну: {message.text} грн", user_id=message.from_user.id)
+    await message.answer(f"✅ Ціна для вихідних оновлена: <b>{message.text} грн</b>.")
+    await state.clear()
+    
+    # Reload dashboard
     msg = await message.answer("Завантаження...")
     fake_cb = CallbackQuery(
         id="0", from_user=message.from_user, chat_instance="0", message=msg, data="admin_settings"

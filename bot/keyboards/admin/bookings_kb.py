@@ -136,7 +136,7 @@ def get_booking_details_kb(
     action_row = []
     if status == BookingStatus.payment_pending_review:
         action_row.append(InlineKeyboardButton(text="✅ Схвалити", callback_data=f"ab_ok:{booking_id}:{back_cb}"))
-        action_row.append(InlineKeyboardButton(text="❌ Відхилити", callback_data=f"ab_payrj:{booking_id}:{back_cb}"))
+        action_row.append(InlineKeyboardButton(text="❌ Відхилити", callback_data=f"ap_rj:{booking_id}:{back_cb}"))
     elif status == BookingStatus.awaiting_payment:
         action_row.append(InlineKeyboardButton(text="✅ Підтвердити", callback_data=f"ab_ok:{booking_id}:{back_cb}"))
         action_row.append(InlineKeyboardButton(text="❌ Скасувати", callback_data=f"ab_no:{booking_id}:{back_cb}"))
@@ -153,7 +153,7 @@ def get_booking_details_kb(
     # Client Profile & Delete row
     # To view client profile: client profile callback
     buttons.append([
-        InlineKeyboardButton(text="👤 Клієнт", callback_data=f"ab_cp:{booking_id}:{back_cb}"),
+        InlineKeyboardButton(text="👤 Клієнт", callback_data=f"ab_client:{booking_id}:{back_cb}"),
         InlineKeyboardButton(text="🗑️ Видалити", callback_data=f"ab_del:{booking_id}:{back_cb}")
     ])
     

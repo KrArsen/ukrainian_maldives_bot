@@ -42,22 +42,75 @@ def get_weekly_schedule_kb(start_date: date, day_stats: list) -> InlineKeyboardM
     
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def get_day_bookings_kb(target_date: date, bookings: list, back_start_date: date) -> InlineKeyboardMarkup:
-    """Keyboards for a single day view details."""
-    buttons = []
-    
-    # Buttons for each active booking of that day
-    for b in bookings:
-        btn_text = f"🛖 №{b.shelter_num} | {b.client_name} ({b.client_phone})"
-        # Back target for detailed view: ab_v:booking_id:back_callback
-        back_cb = f"ab_sch_d:{target_date.isoformat()}"
-        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"ab_v:{b.id}:{back_cb}")])
-        
-    # Back button to the weekly schedule view
-    buttons.append([
+def schedule_day_kb(
+    target_date: date,
+    booked_bookings: list,
+    blocked_dict: dict,   # {tent_number: TentBlock}
+    free_nums: list
+) -> InlineKeyboardMarkup:
+    keyboard = []
+
+    # Booking details buttons (linking directly to our modular booking viewer)
+    for bk in booked_bookings:
+        date_iso = target_date.isoformat()
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"📋 №{bk.tent_number} {bk.full_name}",
+                callback_data=f"ab_v:{bk.id}:ab_sch_d:{date_iso}"
+            )
+        ])
+
+    # Unblock buttons
+    for tent_num, block in blocked_dict.items():
+        date_iso = target_date.isoformat()
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"🔓 Розблокувати №{tent_num}",
+                callback_data=f"admin_unblock_tent:{tent_num}:{date_iso}"
+            )
+        ])
+
+    # Grid of buttons to block free tents
+    if free_nums:
+        keyboard.append([
+            InlineKeyboardButton(text="🔒 Заблокувати шатро:", callback_data="ignore")
+        ])
+        row = []
+        for n in free_nums:
+            date_iso = target_date.isoformat()
+            row.append(InlineKeyboardButton(
+                text=f"№{n}",
+                callback_data=f"admin_block_tent:{n}:{date_iso}"
+            ))
+            if len(row) == 5:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+
+    # Day-by-day navigation
+    prev_date = target_date - timedelta(days=1)
+    next_date = target_date + timedelta(days=1)
+    keyboard.append([
         InlineKeyboardButton(
-            text="⬅️ Назад до тижня", 
-            callback_data=f"ab_sch:{back_start_date.isoformat()}"
-        )
+            text="◀ -1 день",
+            callback_data=f"ab_sch_d:{prev_date.isoformat()}"
+        ),
+        InlineKeyboardButton(
+            text="📆 Сьогодні",
+            callback_data=f"ab_sch_d:{date.today().isoformat()}"
+        ),
+        InlineKeyboardButton(
+            text="+1 день ▶",
+            callback_data=f"ab_sch_d:{next_date.isoformat()}"
+        ),
     ])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+    
+    # Back to week view and main menu
+    monday = target_date - timedelta(days=target_date.weekday())
+    keyboard.append([
+        InlineKeyboardButton(text="📅 Тиждень", callback_data=f"ab_sch:{monday.isoformat()}"),
+        InlineKeyboardButton(text="◀ Головне меню", callback_data="admin_menu")
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)

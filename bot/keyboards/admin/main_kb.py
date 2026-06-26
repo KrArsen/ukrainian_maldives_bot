@@ -12,7 +12,7 @@ def get_admin_main_kb(pending_bookings: int = 0, pending_payments: int = 0) -> I
         ],
         [
             InlineKeyboardButton(text="📋 Всі бронювання", callback_data="admin_all_1"),
-            InlineKeyboardButton(text="📅 Графік", callback_data="admin_sched")
+            InlineKeyboardButton(text="📅 Розклад шатер", callback_data="admin_schedule")
         ],
         [
             InlineKeyboardButton(text="🔍 Пошук", callback_data="admin_search"),

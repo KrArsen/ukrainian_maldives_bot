@@ -19,3 +19,8 @@ class AdminBroadcast(StatesGroup):
 class AdminSettings(StatesGroup):
     waiting_price_input = State()
     waiting_timeout_input = State()
+    waiting_weekday_price = State()
+    waiting_weekend_price = State()
+
+class AdminBlockStates(StatesGroup):
+    waiting_reason = State()

@@ -3,6 +3,7 @@ import calendar
 from datetime import date, timedelta
 from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from bot.services.pricing import is_weekend
 
 MONTHS_UA = ["","Січень","Лютий","Березень","Квітень","Травень","Червень",
              "Липень","Серпень","Вересень","Жовтень","Листопад","Грудень"]
@@ -14,9 +15,17 @@ class CalCb(CallbackData, prefix="cal"):
     month:  int
     day:    int = 0
 
-def build_calendar(year: int, month: int, fully_booked: set = None) -> InlineKeyboardMarkup:
+def build_calendar(
+    year: int,
+    month: int,
+    fully_booked: set = None,
+    weekday_price: int = 1700,
+    weekend_price: int = 2200
+) -> InlineKeyboardMarkup:
     fully_booked = fully_booked or set()
     today = date.today()
+    min_date = today + timedelta(days=1)       # завтра
+    max_date = today + timedelta(days=14)      # через 2 тижні
     rows = []
 
     # Заголовок місяця
@@ -40,27 +49,38 @@ def build_calendar(year: int, month: int, fully_booked: set = None) -> InlineKey
                 ))
             else:
                 d = date(year, month, day)
-                if d < today:
+                if d < min_date or d > max_date:
                     text, action = "·", "ignore"
                 elif d in fully_booked:
                     text, action = "❌", "ignore"
                 else:
-                    text, action = str(day), "day"
+                    if is_weekend(d):
+                        text = f"🌟{day}"
+                    else:
+                        text = str(day)
+                    action = "day"
                 row.append(InlineKeyboardButton(
                     text=text,
                     callback_data=CalCb(action=action, year=year, month=month, day=day).pack()
                 ))
         rows.append(row)
 
+    # Легенда під календарем
+    rows.append([
+        InlineKeyboardButton(
+            text=f"Будній: {weekday_price} грн",
+            callback_data=CalCb(action="ignore", year=year, month=month).pack()
+        ),
+        InlineKeyboardButton(
+            text=f"🌟 Вихідний: {weekend_price} грн",
+            callback_data=CalCb(action="ignore", year=year, month=month).pack()
+        )
+    ])
+
     # Навігація
     prev = (date(year, month, 1) - timedelta(days=1))
     nxt  = (date(year, month, 28) + timedelta(days=4)).replace(day=1)
-    max_d = today.replace(day=1)
-    for _ in range(3):
-        if max_d.month == 12:
-            max_d = max_d.replace(year=max_d.year+1, month=1)
-        else:
-            max_d = max_d.replace(month=max_d.month+1)
+    max_d = max_date.replace(day=1)
 
     nav = []
     if date(year, month, 1) > today.replace(day=1):
@@ -88,3 +108,9 @@ def build_calendar(year: int, month: int, fully_booked: set = None) -> InlineKey
 
     rows.append(nav)
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+async def build_client_calendar(session, year: int, month: int) -> InlineKeyboardMarkup:
+    from bot.database.queries import get_prices, get_fully_booked_dates
+    weekday_price, weekend_price = await get_prices(session)
+    fully_booked = await get_fully_booked_dates(session, year, month)
+    return build_calendar(year, month, fully_booked, weekday_price, weekend_price)

@@ -20,12 +20,14 @@ async def is_admin(user_id: int, session: AsyncSession) -> bool:
     return user is not None and user.is_admin
 
 @router.message(Command("admin"))
-async def cmd_admin(message: Message, session: AsyncSession, state: FSMContext):
+async def cmd_admin(message: Message, session: AsyncSession, state: FSMContext = None):
     """Admin control panel welcome screen."""
     if not await is_admin(message.from_user.id, session):
         return
         
-    await state.clear() # Clear state when opening admin panel
+    if state:
+        await state.clear() # Clear state when opening admin panel
+
     
     # Fetch counts for badges
     pending_bookings = await count_bookings_by_status(session, "awaiting_payment")
@@ -37,12 +39,13 @@ async def cmd_admin(message: Message, session: AsyncSession, state: FSMContext):
     )
 
 @router.callback_query(F.data == "admin_menu")
-async def callback_admin_menu(callback_query: CallbackQuery, bot: Bot, session: AsyncSession, state: FSMContext):
+async def callback_admin_menu(callback_query: CallbackQuery, bot: Bot, session: AsyncSession, state: FSMContext = None):
     if not await is_admin(callback_query.from_user.id, session):
         await callback_query.answer()
         return
         
-    await state.clear()
+    if state:
+        await state.clear()
     await callback_query.answer()
     
     pending_bookings = await count_bookings_by_status(session, "awaiting_payment")

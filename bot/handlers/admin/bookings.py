@@ -5,6 +5,7 @@ from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 import math
 
+from bot.config import settings
 from bot.database.models import BookingStatus
 from bot.database.queries import (
     get_bookings_filtered,
@@ -388,4 +389,28 @@ async def callback_booking_delete(callback_query: CallbackQuery, session: AsyncS
     else:
         # Default back to main menu
         from bot.handlers.admin.main_menu import callback_admin_menu
+        callback_query.data = "admin_menu"
         await callback_admin_menu(callback_query, bot, session, None)
+
+# View client profile from booking details
+@router.callback_query(F.data.startswith("ab_client:"))
+async def callback_booking_client_profile(callback_query: CallbackQuery, session: AsyncSession, bot: Bot):
+    if not await is_admin(callback_query.from_user.id, session):
+        await callback_query.answer()
+        return
+    await callback_query.answer()
+    
+    parts = callback_query.data.split(":")
+    booking_id = int(parts[1])
+    back_cb = ":".join(parts[2:])
+    
+    b = await get_booking_full(session, booking_id)
+    if not b:
+        await callback_query.answer("Бронювання не знайдено.", show_alert=True)
+        return
+    
+    # Redirect to client profile viewer with back_cb pointing back to the booking details
+    details_back = f"ab_v:{booking_id}:{back_cb}"
+    from bot.handlers.admin.clients import callback_client_profile
+    callback_query.data = f"ac_v:{b.user_id}:{details_back}"
+    await callback_client_profile(callback_query, session, bot)

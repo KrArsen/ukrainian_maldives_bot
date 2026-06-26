@@ -1,6 +1,6 @@
 import enum
 from datetime import datetime, date
-from sqlalchemy import BigInteger, Integer, String, Date, DateTime, Boolean, Enum, Text, ForeignKey, Numeric
+from sqlalchemy import BigInteger, Integer, String, Date, DateTime, Boolean, Enum, Text, ForeignKey, Numeric, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from bot.database.engine import Base
 
@@ -33,6 +33,7 @@ class Booking(Base):
     admin_comment: Mapped[str|None]      = mapped_column(Text)
     payment_deadline: Mapped[datetime|None] = mapped_column(DateTime, nullable=True)
     cancelled_by:  Mapped[int|None]      = mapped_column(BigInteger, nullable=True)
+    amount:        Mapped[int]           = mapped_column(Integer, nullable=False, default=1700)
     created_at:    Mapped[datetime]      = mapped_column(DateTime, default=datetime.utcnow)
 
     payments: Mapped[list["Payment"]] = relationship(back_populates="booking", cascade="all, delete-orphan")
@@ -66,3 +67,17 @@ class Setting(Base):
     __tablename__ = "settings"
     key: Mapped[str]   = mapped_column(String(50), primary_key=True)
     value: Mapped[str] = mapped_column(String(255), nullable=False)
+
+class TentBlock(Base):
+    __tablename__ = "tent_blocks"
+    id:          Mapped[int]           = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tent_number: Mapped[int]           = mapped_column(Integer, nullable=False)
+    block_date:  Mapped[date]          = mapped_column(Date, nullable=False)
+    reason:      Mapped[str|None]      = mapped_column(String(255), nullable=True)
+    created_by:  Mapped[int]           = mapped_column(BigInteger, nullable=False)
+    created_at:  Mapped[datetime]      = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint('tent_number', 'block_date', name='uq_tent_block_date'),
+    )
+

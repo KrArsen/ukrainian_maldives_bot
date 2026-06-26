@@ -2,16 +2,19 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import date
 
-def get_settings_kb() -> InlineKeyboardMarkup:
+def get_settings_kb(weekday_price: int = 1700, weekend_price: int = 2200) -> InlineKeyboardMarkup:
     """Settings menu options."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="💰 Змінити ціну", callback_data="as_price"),
-            InlineKeyboardButton(text="⏱️ Змінити таймаут", callback_data="as_timeout")
+            InlineKeyboardButton(text=f"💰 Будні: {weekday_price} грн", callback_data="admin_set_weekday_price"),
+            InlineKeyboardButton(text=f"🌟 Вихідні: {weekend_price} грн", callback_data="admin_set_weekend_price")
         ],
         [
-            InlineKeyboardButton(text="📊 Експорт в Excel (CSV)", callback_data="as_export_menu"),
+            InlineKeyboardButton(text="⏱️ Змінити таймаут", callback_data="as_timeout"),
             InlineKeyboardButton(text="✉️ Масова розсилка", callback_data="as_broadcast")
+        ],
+        [
+            InlineKeyboardButton(text="📊 Експорт в Excel (CSV)", callback_data="as_export_menu")
         ],
         [
             InlineKeyboardButton(text="⬅️ Назад до меню", callback_data="admin_menu")
@@ -55,7 +58,6 @@ def get_export_custom_months_kb(year: int) -> InlineKeyboardMarkup:
     ]
     
     buttons = []
-    # Month buttons in 3 columns
     row = []
     for idx, name in enumerate(months_ua, 1):
         row.append(InlineKeyboardButton(text=name, callback_data=f"ase_quick:{year}:{idx}"))
@@ -63,7 +65,6 @@ def get_export_custom_months_kb(year: int) -> InlineKeyboardMarkup:
             buttons.append(row)
             row = []
             
-    # Year switching row
     buttons.append([
         InlineKeyboardButton(text=f"◀️ {year - 1}", callback_data=f"ase_yr:{year - 1}"),
         InlineKeyboardButton(text=f"🟢 {year}", callback_data="ignore"),

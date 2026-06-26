@@ -90,8 +90,8 @@ async def receive_screenshot(message: Message, state: FSMContext, session: Async
     db_admins_res = await session.execute(select(User.telegram_id).where(User.is_admin == True))
     all_admin_ids = set(settings.ADMIN_IDS) | {row[0] for row in db_admins_res.fetchall()}
 
-    # Calculate price based on database setting or weekday/weekend fallback
-    price = await get_booking_price(session, booking.booking_date)
+    # Read price from booking amount saved in DB
+    price = booking.amount
 
     # Send screenshot with details to all admins
     admin_caption = (
@@ -159,4 +159,4 @@ async def user_cancel_booking(callback: CallbackQuery, session: AsyncSession):
             await callback.answer("Цією кнопкою можна скасувати лише бронювання, що очікують оплати.", show_alert=True)
     else:
         await callback.answer("Бронювання не знайдено.", show_alert=True)
-    await callback.answer()
+

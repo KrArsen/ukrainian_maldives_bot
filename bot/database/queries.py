@@ -1,6 +1,6 @@
 from sqlalchemy import select, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
-from bot.database.models import User, Booking, BookingStatus
+from bot.database.models import User, Booking, BookingStatus, TentBlock
 from datetime import date
 
 async def get_or_create_user(session: AsyncSession, telegram_id: int, username: str | None, full_name: str | None):
@@ -12,28 +12,44 @@ async def get_or_create_user(session: AsyncSession, telegram_id: int, username: 
     return user
 
 async def get_booked_shelters_on_date(session: AsyncSession, booking_date: date) -> set[int]:
-    """Які шатра вже зайняті на цю дату."""
+    """Які шатра вже зайняті або заблоковані на цю дату."""
     result = await session.execute(
         select(Booking.shelter_num).where(
             Booking.booking_date == booking_date,
             Booking.status.in_([BookingStatus.awaiting_payment, BookingStatus.payment_pending_review, BookingStatus.confirmed])
         )
     )
-    return set(row[0] for row in result.fetchall())
+    booked = set(row[0] for row in result.fetchall())
+    blocked = await get_blocked_tent_numbers_for_date(session, booking_date)
+    return booked | blocked
 
 async def get_fully_booked_dates(session: AsyncSession, year: int, month: int) -> set[date]:
-    """Дати, коли всі 10 шатер зайняті — для відображення на календарі як недоступні."""
-    result = await session.execute(
-        select(Booking.booking_date)
-        .where(
-            func.strftime('%Y', Booking.booking_date) == str(year),
-            func.strftime('%m', Booking.booking_date) == f"{month:02d}",
+    """Дати, коли всі 10 шатер зайняті або заблоковані — для відображення на календарі як недоступні."""
+    from collections import defaultdict
+    import calendar
+    from_date = date(year, month, 1)
+    last_day = calendar.monthrange(year, month)[1]
+    to_date = date(year, month, last_day)
+    
+    tent_count_per_date = defaultdict(set)
+    
+    # 1. Bookings in month
+    bookings_res = await session.execute(
+        select(Booking.booking_date, Booking.shelter_num).where(
+            Booking.booking_date >= from_date,
+            Booking.booking_date <= to_date,
             Booking.status.in_([BookingStatus.awaiting_payment, BookingStatus.payment_pending_review, BookingStatus.confirmed])
         )
-        .group_by(Booking.booking_date)
-        .having(func.count(Booking.shelter_num) >= 10)
     )
-    return set(row[0] for row in result.fetchall())
+    for b_date, s_num in bookings_res.fetchall():
+        tent_count_per_date[b_date].add(s_num)
+        
+    # 2. Blocks in month
+    blocks = await get_blocks_for_month(session, year, month)
+    for bl in blocks:
+        tent_count_per_date[bl.block_date].add(bl.tent_number)
+        
+    return {d for d, tents in tent_count_per_date.items() if len(tents) >= 10}
 
 async def is_shelter_available(session: AsyncSession, shelter_num: int, booking_date: date) -> bool:
     result = await session.execute(
@@ -45,7 +61,7 @@ async def is_shelter_available(session: AsyncSession, shelter_num: int, booking_
     )
     return result.scalar_one_or_none() is None
 
-async def create_booking(session: AsyncSession, user_id: int, shelter_num: int, booking_date: date, client_name: str, client_phone: str) -> Booking:
+async def create_booking(session: AsyncSession, user_id: int, shelter_num: int, booking_date: date, client_name: str, client_phone: str, amount: int = 1700) -> Booking:
     from datetime import datetime, timedelta
     from bot.config import settings
     timeout_str = await get_setting(session, "payment_timeout_hours", str(settings.PAYMENT_TIMEOUT_HOURS))
@@ -58,6 +74,7 @@ async def create_booking(session: AsyncSession, user_id: int, shelter_num: int, 
         client_name=client_name,
         client_phone=client_phone,
         status=BookingStatus.awaiting_payment,
+        amount=amount,
         payment_deadline=deadline
     )
     session.add(b)
@@ -287,7 +304,7 @@ async def get_booking_price(session: AsyncSession, booking_date: date) -> int:
     price_str = await get_setting(session, "booking_price")
     if price_str and price_str.isdigit():
         return int(price_str)
-    is_weekend = booking_date.weekday() in (4, 5, 6)
+    is_weekend = booking_date.weekday() in (5, 6)
     from bot.config import settings
     return settings.WEEKEND_PRICE if is_weekend else settings.WEEKDAY_PRICE
 
@@ -602,12 +619,18 @@ async def get_schedule_for_date(session: AsyncSession, target_date) -> dict:
     )
     bookings = list(res.scalars().all())
     
-    occupied = [(b.shelter_num, b) for b in bookings]
+    # Map attributes to comply with prompt's bk.tent_number, bk.full_name, etc.
+    for b in bookings:
+        b.tent_number = b.shelter_num
+        b.check_in_date = b.booking_date
+        b.full_name = b.client_name
+        b.phone = b.client_phone
+        
     occupied_nums = [b.shelter_num for b in bookings]
     free = [i for i in range(1, 11) if i not in occupied_nums]
     
     return {
-        "occupied": occupied,
+        "occupied_bookings": bookings,
         "free": free
     }
 
@@ -650,5 +673,123 @@ async def admin_delete_booking(session: AsyncSession, booking_id: int):
     if b:
         await session.delete(b)
         await session.commit()
+
+# --- DYNAMIC PRICING ---
+async def get_prices(session: AsyncSession) -> tuple[int, int]:
+    """Повертає (weekday_price, weekend_price) з БД."""
+    weekday = await get_setting(session, 'price_weekday', '1700')
+    weekend = await get_setting(session, 'price_weekend', '2200')
+    return int(weekday), int(weekend)
+
+# --- TENT BLOCKING ---
+async def block_tent(
+    session: AsyncSession, tent_number: int, block_date: date,
+    created_by: int, reason: str = None
+) -> bool:
+    """
+    Блокує шатро на дату. Повертає True якщо успішно, False якщо вже є активне бронювання.
+    """
+    # Перевірити чи є підтверджене/активне бронювання
+    existing = await session.execute(
+        select(Booking).where(
+            Booking.shelter_num == tent_number,
+            Booking.booking_date == block_date,
+            Booking.status.in_([BookingStatus.awaiting_payment, BookingStatus.payment_pending_review, BookingStatus.confirmed])
+        )
+    )
+    if existing.scalars().first():
+        return False  # Не можна заблокувати — є активне бронювання
+
+    try:
+        block = TentBlock(
+            tent_number=tent_number,
+            block_date=block_date,
+            reason=reason,
+            created_by=created_by
+        )
+        session.add(block)
+        await session.commit()
+        return True
+    except Exception:
+        await session.rollback()
+        return False  # Вже заблоковано
+
+async def unblock_tent(session: AsyncSession, tent_number: int, block_date: date) -> bool:
+    """Знімає блокування шатра на дату."""
+    result = await session.execute(
+        select(TentBlock).where(
+            TentBlock.tent_number == tent_number,
+            TentBlock.block_date == block_date
+        )
+    )
+    block = result.scalar_one_or_none()
+    if block:
+        await session.delete(block)
+        await session.commit()
+        return True
+    return False
+
+async def get_blocks_for_date(session: AsyncSession, target_date: date) -> list[TentBlock]:
+    """Всі заблоковані шатра на конкретну дату."""
+    result = await session.execute(
+        select(TentBlock).where(TentBlock.block_date == target_date)
+    )
+    return list(result.scalars().all())
+
+async def get_blocks_for_month(session: AsyncSession, year: int, month: int) -> list[TentBlock]:
+    """Всі блокування на місяць (для відображення в адмін-календарі)."""
+    import calendar
+    from_date = date(year, month, 1)
+    last_day = calendar.monthrange(year, month)[1]
+    to_date = date(year, month, last_day)
+    result = await session.execute(
+        select(TentBlock).where(
+            TentBlock.block_date >= from_date,
+            TentBlock.block_date <= to_date
+        ).order_by(TentBlock.block_date, TentBlock.tent_number)
+    )
+    return list(result.scalars().all())
+
+async def is_tent_blocked(session: AsyncSession, tent_number: int, block_date: date) -> bool:
+    """Перевірити чи шатро заблоковано на дату."""
+    result = await session.execute(
+        select(TentBlock).where(
+            TentBlock.tent_number == tent_number,
+            TentBlock.block_date == block_date
+        )
+    )
+    return result.scalars().first() is not None
+
+async def get_blocked_tent_numbers_for_date(session: AsyncSession, target_date: date) -> set[int]:
+    """Швидко отримати множину номерів заблокованих шатер на дату."""
+    blocks = await get_blocks_for_date(session, target_date)
+    return {b.tent_number for b in blocks}
+
+async def get_available_tents_for_date(session: AsyncSession, target_date: date) -> list[int]:
+    """
+    Повертає список номерів вільних шатер (1-10) на дату.
+    Враховує: підтверджені/активні бронювання + ручні блокування адміна.
+    """
+    all_tents = set(range(1, 11))
+
+    # Зайняті через бронювання
+    booked = await session.execute(
+        select(Booking.shelter_num).where(
+            Booking.booking_date == target_date,
+            Booking.status.in_([BookingStatus.confirmed, BookingStatus.awaiting_payment, BookingStatus.payment_pending_review])
+        )
+    )
+    booked_tents = {row[0] for row in booked.fetchall()}
+
+    # Заблоковані вручну адміном
+    blocked_tents = await get_blocked_tent_numbers_for_date(session, target_date)
+
+    occupied = booked_tents | blocked_tents
+    return sorted(list(all_tents - occupied))
+
+async def is_date_fully_booked(session: AsyncSession, target_date: date) -> bool:
+    """Для calendar_kb — ❌ якщо всі 10 шатер недоступні."""
+    available = await get_available_tents_for_date(session, target_date)
+    return len(available) == 0
 
 

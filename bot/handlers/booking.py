@@ -14,32 +14,37 @@ from bot.database.queries import (
     get_booked_shelters_on_date,
     log_activity,
     create_payment,
-    get_booking_price
+    get_prices
 )
 from bot.keyboards.booking_kb import (
-    get_booking_dates_kb,
     get_free_shelters_kb,
     get_phone_keyboard,
     get_confirmation_kb
 )
+from bot.keyboards.calendar_kb import CalCb, build_client_calendar
 from bot.keyboards.main_menu import get_main_menu
+from bot.services.pricing import get_price_for_date, get_price_label
 
 router = Router()
 
-async def start_booking(chat_id: int, state: FSMContext, bot: Bot):
+async def start_booking(chat_id: int, state: FSMContext, session: AsyncSession, bot: Bot):
     """Starts the booking FSM by prompting the user to select a date first."""
     await state.clear()
     await state.set_state(BookingFSM.choosing_date)
+    
+    today = date.today()
+    kb = await build_client_calendar(session, today.year, today.month)
+    
     await bot.send_message(
         chat_id=chat_id,
-        text="📅 <b>Бронювання шатра</b>\n\nКрок 1: Оберіть дату заїзду на найближчі 2 тижні 👇",
-        reply_markup=get_booking_dates_kb()
+        text="📅 <b>Бронювання шатра</b>\n\nКрок 1: Оберіть дату заїзду 👇",
+        reply_markup=kb
     )
 
 @router.message(F.text == "📅 Забронювати")
 @router.message(Command("booking"))
-async def cmd_booking(message: Message, state: FSMContext, bot: Bot):
-    await start_booking(message.chat.id, state, bot)
+async def cmd_booking(message: Message, state: FSMContext, session: AsyncSession, bot: Bot):
+    await start_booking(message.chat.id, state, session, bot)
 
 # Cancel click inside booking FSM
 @router.callback_query(F.data == "cancel_booking_flow")
@@ -56,37 +61,65 @@ async def cancel_booking_callback(callback_query: CallbackQuery, state: FSMConte
         reply_markup=get_main_menu()
     )
 
-# Step 1: Date selected
-@router.callback_query(StateFilter(BookingFSM.choosing_date), F.data.startswith("book_date_"))
-async def process_date_selected(callback_query: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot):
+# --- CALENDAR NAVIGATION ---
+@router.callback_query(StateFilter(BookingFSM.choosing_date), CalCb.filter(F.action == "prev"))
+async def process_calendar_prev(callback_query: CallbackQuery, callback_data: CalCb, session: AsyncSession, bot: Bot):
     await callback_query.answer()
-    selected_date_str = callback_query.data.split("_")[-1]
-    booking_date = date.fromisoformat(selected_date_str)
+    kb = await build_client_calendar(session, callback_data.year, callback_data.month)
+    await callback_query.message.edit_reply_markup(reply_markup=kb)
+
+@router.callback_query(StateFilter(BookingFSM.choosing_date), CalCb.filter(F.action == "next"))
+async def process_calendar_next(callback_query: CallbackQuery, callback_data: CalCb, session: AsyncSession, bot: Bot):
+    await callback_query.answer()
+    kb = await build_client_calendar(session, callback_data.year, callback_data.month)
+    await callback_query.message.edit_reply_markup(reply_markup=kb)
+
+@router.callback_query(StateFilter(BookingFSM.choosing_date), CalCb.filter(F.action == "cancel"))
+async def process_calendar_cancel(callback_query: CallbackQuery, state: FSMContext, bot: Bot):
+    await cancel_booking_callback(callback_query, state, bot)
+
+# --- DATE SELECTED FROM CALENDAR ---
+@router.callback_query(StateFilter(BookingFSM.choosing_date), CalCb.filter(F.action == "day"))
+async def process_calendar_day(
+    callback_query: CallbackQuery,
+    callback_data: CalCb,
+    state: FSMContext,
+    session: AsyncSession,
+    bot: Bot
+):
+    await callback_query.answer()
+    booking_date = date(callback_data.year, callback_data.month, callback_data.day)
     
-    await state.update_data(booking_date=selected_date_str)
-    
-    # Query booked shatras on this date
+    # Query booked/blocked shatras on this date
     booked_shelters = await get_booked_shelters_on_date(session, booking_date)
     free_shelters = [i for i in range(1, 11) if i not in booked_shelters]
     
-    date_formatted = booking_date.strftime("%d.%m.%Y")
+    date_formatted = booking_date.strftime("%d.%m.%Y (%A)")
+    
+    # Calculate price dynamically from DB settings
+    weekday_price, weekend_price = await get_prices(session)
+    price = get_price_for_date(booking_date, weekday_price, weekend_price)
+    price_label = get_price_label(booking_date, weekday_price, weekend_price)
+    
+    await state.update_data(
+        booking_date=booking_date.isoformat(),
+        amount=price,
+        price_label=price_label
+    )
     
     if not free_shelters:
-        # If all 10 shatras are booked
-        await bot.edit_message_text(
-            chat_id=callback_query.message.chat.id,
-            message_id=callback_query.message.message_id,
-            text=f"⚠️ На жаль, на <b>{date_formatted}</b> немає вільних шатер.\n\nОберіть іншу дату 👇",
-            reply_markup=get_booking_dates_kb()
+        kb = await build_client_calendar(session, callback_data.year, callback_data.month)
+        await callback_query.message.edit_text(
+            text=f"⚠️ На жаль, на <b>{booking_date.strftime('%d.%m.%Y')}</b> немає вільних шатер.\n\nОберіть іншу дату 👇",
+            reply_markup=kb
         )
         return
         
     await state.set_state(BookingFSM.choosing_shelter)
-    await bot.edit_message_text(
-        chat_id=callback_query.message.chat.id,
-        message_id=callback_query.message.message_id,
+    await callback_query.message.edit_text(
         text=(
-            f"📅 Обрана дата: <b>{date_formatted}</b>\n\n"
+            f"📅 Обрана дата: <b>{date_formatted}</b>\n"
+            f"{price_label}\n\n"
             f"Крок 2: Оберіть вільне шатро 👇"
         ),
         reply_markup=get_free_shelters_kb(free_shelters)
@@ -94,14 +127,14 @@ async def process_date_selected(callback_query: CallbackQuery, state: FSMContext
 
 # Handle Change Date callback
 @router.callback_query(StateFilter(BookingFSM.choosing_shelter), F.data == "change_date")
-async def process_change_date(callback_query: CallbackQuery, state: FSMContext, bot: Bot):
+async def process_change_date(callback_query: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot):
     await callback_query.answer()
     await state.set_state(BookingFSM.choosing_date)
-    await bot.edit_message_text(
-        chat_id=callback_query.message.chat.id,
-        message_id=callback_query.message.message_id,
-        text="📅 <b>Бронювання шатра</b>\n\nКрок 1: Оберіть дату заїзду на найближчі 2 тижні 👇",
-        reply_markup=get_booking_dates_kb()
+    today = date.today()
+    kb = await build_client_calendar(session, today.year, today.month)
+    await callback_query.message.edit_text(
+        text="📅 <b>Бронювання шатра</b>\n\nКрок 1: Оберіть дату заїзду 👇",
+        reply_markup=kb
     )
 
 # Step 2: Shelter selected
@@ -113,7 +146,6 @@ async def process_shelter_selected(callback_query: CallbackQuery, state: FSMCont
     
     await state.set_state(BookingFSM.entering_name)
     
-    # Delete the inline keyboard message and prompt for name
     try:
         await bot.delete_message(chat_id=callback_query.message.chat.id, message_id=callback_query.message.message_id)
     except Exception:
@@ -151,7 +183,6 @@ async def process_phone_contact(message: Message, state: FSMContext):
 @router.message(StateFilter(BookingFSM.sharing_phone))
 async def process_phone_text(message: Message, state: FSMContext):
     phone = message.text.strip() if message.text else ""
-    # Basic validation for digits count
     cleaned = "".join(filter(str.isdigit, phone))
     if len(cleaned) < 9:
         await message.answer("⚠️ Некоректний формат телефону. Будь ласка, поділіться контактом через кнопку або введіть вірний номер 👇")
@@ -167,6 +198,8 @@ async def show_confirmation_summary(message: Message, state: FSMContext):
     
     booking_date = date.fromisoformat(data["booking_date"])
     date_ua_format = booking_date.strftime("%d.%m.%Y")
+    amount = data["amount"]
+    price_label = data["price_label"]
     
     confirm_text = (
         "🏖 <b>Підтвердіть бронювання</b>\n\n"
@@ -174,7 +207,9 @@ async def show_confirmation_summary(message: Message, state: FSMContext):
         f"📅 Дата: {date_ua_format}\n"
         f"👤 Ім'я: {data['client_name']}\n"
         f"📞 Телефон: {data['client_phone']}\n"
-        "👥 2 дорослих"
+        f"👥 2 дорослих\n\n"
+        f"💰 <b>До сплати:</b> {amount} грн\n"
+        f"   ({price_label})"
     )
     
     await message.answer(
@@ -190,6 +225,7 @@ async def process_booking_confirmed(callback_query: CallbackQuery, state: FSMCon
     
     booking_date = date.fromisoformat(data["booking_date"])
     date_ua_format = booking_date.strftime("%d.%m.%Y")
+    amount = data["amount"]
     
     # Save booking to database (defaults to awaiting_payment status)
     booking = await create_booking(
@@ -198,18 +234,16 @@ async def process_booking_confirmed(callback_query: CallbackQuery, state: FSMCon
         shelter_num=data["shelter_num"],
         booking_date=booking_date,
         client_name=data["client_name"],
-        client_phone=data["client_phone"]
+        client_phone=data["client_phone"],
+        amount=amount
     )
-    
-    # Calculate price based on database setting or weekday/weekend fallback
-    price = await get_booking_price(session, booking_date)
     
     # Create payment record
     comment = f"{booking.client_name} {date_ua_format}"
     await create_payment(
         session=session,
         booking_id=booking.id,
-        amount=float(price),
+        amount=float(amount),
         card=settings.MONOBANK_CARD,
         comment=comment
     )
@@ -217,7 +251,7 @@ async def process_booking_confirmed(callback_query: CallbackQuery, state: FSMCon
     await log_activity(
         session=session,
         action_type="created",
-        details=f"Користувач {booking.client_name} ({booking.client_phone}) забронював Шатро №{booking.shelter_num} на {date_ua_format} (ID: {booking.id}), статус: очікує оплати",
+        details=f"Користувач {booking.client_name} ({booking.client_phone}) забронював Шатро №{booking.shelter_num} на {date_ua_format} (ID: {booking.id}), сума: {amount} грн, статус: очікує оплати",
         booking_id=booking.id,
         user_id=callback_query.from_user.id
     )
@@ -228,16 +262,14 @@ async def process_booking_confirmed(callback_query: CallbackQuery, state: FSMCon
     except Exception:
         pass
         
-    # Format card number for display (spaces every 4 digits)
     cleaned_card = "".join(filter(str.isdigit, settings.MONOBANK_CARD))
     formatted_card = " ".join(cleaned_card[i:i+4] for i in range(0, len(cleaned_card), 4))
     
-    # Send instructions and Monobank card to user
     payment_text = (
         "💳 <b>Для підтвердження бронювання необхідно сплатити:</b>\n\n"
         f"🛖 <b>Шатро №{booking.shelter_num}</b>\n"
         f"📅 <b>Дата:</b> {date_ua_format}\n"
-        f"💰 <b>Сума до сплати:</b> {price} грн\n\n"
+        f"💰 <b>Сума до сплати:</b> {amount} грн\n\n"
         f"💳 <b>Карта Monobank:</b> <code>{formatted_card}</code>\n"
         f"👤 <b>Отримувач:</b> {settings.MONOBANK_CARD_OWNER}\n\n"
         "⚠️ <b>ВАЖЛИВО:</b> При переказі обов'язково вкажіть у коментарі:\n"
@@ -254,4 +286,3 @@ async def process_booking_confirmed(callback_query: CallbackQuery, state: FSMCon
     )
     
     await state.clear()
-
